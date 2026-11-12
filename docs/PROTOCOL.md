@@ -33,7 +33,7 @@ session ␟ chat ␟ id ␟ kind ␟ flags ␟ text
   | kind | meaning | text |
   |---|---|---|
   | `h` | hello, sent at PLAYER_LOGIN/after /reload and every 60 s while the bridge is unseen | `k=v;…` with keys `v` (protocol), `b` (build string from `GetBuildInfo()`), `i` (interface), `char` (`Name-Realm`), `p` (installed slot count), `s` (doorbell mode `A`/`B`/`0`), `u` (UIParent effective scale), `g` (`WxH` physical), `n` (last msg id), `cap` (v1.1 capabilities, comma list: `quest`, `cmd`) |
-  | `k` | game context, only when changed; precedes an `m` in the same frame | `k=v;…`: `zone`,`sub`,`x`,`y`,`lvl`,`class`,`race`,`money`,`combat`,`instance`,`lockdown` |
+  | `k` | game context, only when changed; precedes an `m` in the same frame | `k=v;…`: base keys `zone`,`sub`,`x`,`y`,`lvl`,`class`,`race`,`money`,`combat`,`instance`,`lockdown`; v1.3 appends `prof`,`bags`,`xp`,`rested`,`quest` (below) |
   | `m` | user message to Hermes | UTF-8 text, separators replaced by spaces |
   | `x` | bye (PLAYER_LOGOUT) | empty |
   | `e` | Lua error report captured by the addon (dev aid) | first 900 bytes of message+stack |
@@ -44,6 +44,42 @@ session ␟ chat ␟ id ␟ kind ␟ flags ␟ text
   window (B.2). Unknown flag keys are ignored.
 - **Dedupe is per frame, not per record:** the bridge processes every record of a frame, then marks
   `(session, id)` handled. A `k` record never consumes the id (rev 2026-11-09, e2e finding).
+
+#### A.1.1 Context keys, base (v1.0) and v1.3 additions
+Base keys keep their positions; the v1.3 keys are **appended after `lockdown`** because an adapter
+that keeps only the first N fields of a record must still see a complete base record. Consumers
+ignore keys they do not know, so an old bridge/adapter reading a new addon loses only the tail.
+
+| key | type | v1.3 meaning |
+|---|---|---|
+| `zone`, `sub` | text | zone / subzone name (unchanged) |
+| `x`, `y` | decimal, 1 dp | map position in percent (unchanged) |
+| `lvl` | int | character level (unchanged) |
+| `class`, `race` | text token | `UnitClass`/`UnitRace` token as the client returns it, e.g. `WARRIOR` / `Human` (unchanged) |
+| `money` | int | copper on hand (unchanged) |
+| `combat` | `0`/`1` | in combat (unchanged) |
+| `instance` | `0`/`1` | inside an instance (unchanged) |
+| `lockdown` | `0`/`1` | chat-messaging lockdown active (unchanged) |
+| `prof` | text, ≤80 B | primary professions with rank: `Mining 12/75,Skinning 30/75`; comma-separated in profession-slot order (1, then 2). Omitted when no profession is learned. A rank is dropped when `rank`/`maxRank` is missing or secret. |
+| `bags` | int | total free slots over the backpack (bag 0) and the equipped bags (`1..NUM_BAG_SLOTS`, plus the reagent bag when one is equipped). Empty bag slots contribute nothing. Omitted when no count is readable. |
+| `xp` | int 0–100 | percent of the current level, `floor(UnitXP/UnitXPMax*100+0.5)`. Omitted at max level (`UnitXPMax` 0) or when either value is unavailable/secret. |
+| `rested` | int ≥1 | rested XP as a percent of the level (`GetXPExhaustion` / `UnitXPMax`). Omitted when nothing is rested or the result rounds below 1 %. |
+| `quest` | text, ≤60 B | super-tracked quest, else the first watched quest: `<questID>:<title>`, e.g. `26228:Wolves at the Door`. The title is sanitized (`;`, `=`, `|` and control bytes become spaces) and byte-cut on a UTF-8 boundary. Omitted when no quest is tracked/watchable or the title is unnameable. |
+
+Every value is feature-detected, `pcall`-guarded and secret-guarded (`issecretvalue`): a value the
+client marks secret is treated as absent, never re-sent as a placeholder. A value may not contain
+`;`, `=`, `|` or a control byte; the addon replaces them with spaces before joining.
+
+**Size:** the whole `k` text is kept at or below 350 bytes of the 3200-byte payload budget. Values
+are individually capped (`prof` 80 B, `quest` 60 B); when the assembled text is still over 350 B the
+addon sheds the new keys in the order `quest`, `prof`, `rested`, `bags`, `xp` and never a base key.
+The existing rule still applies: if a frame would exceed 3200 bytes the context is dropped first,
+then the `q` snapshot, and only then is the message refused.
+
+**Change detection:** the addon resends `k` when it differs from the last one it framed. For that
+comparison only, `xp` is rounded down to a 5-point step and `rested` to a 10-point step, so a kill
+does not force a new ~200-byte record on every message; a resent record always carries the exact
+current values. The level itself (`lvl`) is exact, so a ding is always a change.
 
 ### A.2 Frame (bytes)
 ```

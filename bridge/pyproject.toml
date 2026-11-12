@@ -1,6 +1,6 @@
 [project]
 name = "wowhermes-bridge"
-version = "0.2.0"
+version = "0.2.1"
 description = "Windows companion bridge for the WoWHermes addon: pixel capture, slot publishing, doorbells, Hermes gateway client and overlay."
 readme = "README.md"
 requires-python = ">=3.12"

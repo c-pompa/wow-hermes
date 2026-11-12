@@ -40,7 +40,7 @@ TOOLSET = "wow"
 CURSEFORGE_API_BASE = "https://api.curseforge.com"
 CURSEFORGE_GAME_ID = 1                    # World of Warcraft
 CURSEFORGE_FOREVER_VERSION_TYPE_ID = 88568  # "Forever 1.60.1" game version type
-CURSEFORGE_KEY_ENV = "WOW_CURSEFORGE_API_KEY"  # per-profile fallback, shared file wins
+CURSEFORGE_KEY_ENV = "WOW_CURSEFORGE_API_KEY"  # profile-scoped Hermes secret
 
 _ADDON_HOSTS = {
     "curseforge.com": "curseforge",
@@ -96,44 +96,15 @@ def set_curseforge_key_getter(fn: Optional[Callable[[], str]]) -> None:
     _curseforge_key_getter = fn
 
 
-def _key_module():
-    """The shared-key resolver module (package import, else loaded by path).
-
-    ``tools.py`` is also loaded as a standalone module (unit tests, embedding
-    hosts), where a relative import has no parent package; loading the sibling
-    file by path keeps both import styles working.
-    """
-    try:
-        from . import curseforge_key  # type: ignore[import-not-found]
-
-        return curseforge_key
-    except Exception:
-        pass
-    name = "wow_plugin_curseforge_key"
-    if name in sys.modules:
-        return sys.modules[name]
-    import importlib.util
-    from pathlib import Path
-
-    path = Path(__file__).resolve().parent / "curseforge_key.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:  # pragma: no cover — corrupt install
-        raise ImportError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def curseforge_key() -> str:
-    """The machine's CurseForge key: shared file first, then profile env.
+    """The player's CurseForge key from the *active profile's* Hermes secret scope.
 
-    The shared file (``<hermes root>/plugin-data/wow/curseforge.key``) makes one
-    key work across every Hermes profile on this machine; a per-profile
-    ``WOW_CURSEFORGE_API_KEY`` stays as the fallback for older installs. A
-    multiplexed gateway still never borrows a *different* profile's env value
-    (the fallback is the scoped secret scope). Never logged, never returned to
-    the model.
+    Resolution is ``agent.secret_scope.get_secret`` only — the same fail-closed
+    reader every other Hermes credential uses. There is no plugin-managed key
+    file: under a multiplexed gateway a miss returns ``""`` instead of borrowing
+    another profile's ``os.environ`` value, and the desktop setup page writes the
+    key into the selected profile's own secret store. Never logged, never
+    returned to the model.
     """
     if _curseforge_key_getter is not None:
         try:
@@ -141,7 +112,18 @@ def curseforge_key() -> str:
         except Exception:
             return ""
     try:
-        return _key_module().resolve_key()[0]
+        from agent.secret_scope import get_secret
+
+        return str(get_secret(CURSEFORGE_KEY_ENV, "") or "").strip()
+    except Exception:
+        pass
+    # Hermes's own scoped helper: same ``get_secret`` call, but it also handles
+    # the default profile's unscoped startup path. Never a direct os.environ or
+    # file read here.
+    try:
+        from gateway.platforms._shared import get_scoped_secret
+
+        return str(get_scoped_secret(CURSEFORGE_KEY_ENV, "") or "").strip()
     except Exception:
         return ""
 

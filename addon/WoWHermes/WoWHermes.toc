@@ -2,7 +2,7 @@
 ## Title: WoW Hermes
 ## Notes: Chat with your Hermes AI agent from inside Azeroth.
 ## Author: cpompa
-## Version: 0.2.0
+## Version: 0.2.1
 ## Category: Chat & Communication
 ## IconTexture: Interface\AddOns\WoWHermes\media\hermes
 ## SavedVariables: WoWHermesDB
@@ -23,6 +23,7 @@ PromptFrame.lua
 Confirm.lua
 ReloadPrompt.lua
 Format.lua
+MapPin.lua
 Scrollbar.lua
 Display.lua
 CopyFrame.lua

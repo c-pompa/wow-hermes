@@ -13,10 +13,13 @@
  *   - theme variables only, no hardcoded colors
  *
  * Backend contract (dashboard/plugin_api.py, mounted at /api/plugins/wow):
- *   GET  /status -> { connected, character, mode, last_hello, listener }
+ *   GET  /status -> { connected, character, mode, last_hello, listener,
+ *                     sources: { primary, secondary, other } }
  *   POST /setup  -> { ok, steps: [{ step, ok, detail }], token: string|null,
  *                     gateway_url, profile,
  *                     pairing: { addon_zip, bridge_install } }
+ *   POST /sources -> { ok, profile, sources, defaults, changed, reset }
+ *                    body { profile, primary, secondary, other } | { profile, reset: true }
  * Every field degrades to '—' when the backend has not answered it yet.
  *
  * Component/prop names below were verified against
@@ -60,6 +63,63 @@ const DEFAULTS = {
   curseforgeApiKey: ''
 }
 
+/**
+ * Research sources (v1.3) — the per-profile developer setting. Defaults mirror
+ * `sources.py`; the backend validates again, so this copy is only for fast
+ * inline feedback (the POST is the gate).
+ */
+const SOURCES_DEFAULTS = { primary: 'wowhead.com', secondary: 'ahledger.com', other: 'web' }
+const SOURCE_MAX_CHARS = 100
+const OTHER_MAX_HOSTS = 3
+
+// Bare hostname with an optional path prefix; no scheme, port, spaces or quotes.
+const HOST_SEGMENT = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
+const HOST_RE = new RegExp(`^${HOST_SEGMENT}(?:\\.${HOST_SEGMENT})+(?:/[A-Za-z0-9._~%+-]+)*$`)
+const PLAIN_HOST_RE = new RegExp(`^${HOST_SEGMENT}(?:\\.${HOST_SEGMENT})+$`)
+
+function hostProblem(label, raw) {
+  const value = String(raw === null || raw === undefined ? '' : raw).trim().toLowerCase()
+  if (!value) return `${label} cannot be empty.`
+  if (value.length > SOURCE_MAX_CHARS) return `${label} must be at most ${SOURCE_MAX_CHARS} characters.`
+  if (!HOST_RE.test(value)) {
+    return `${label} must be a bare hostname, optionally with a path (e.g. ${SOURCES_DEFAULTS.primary}).`
+  }
+  return ''
+}
+
+function otherProblem(raw) {
+  const value = String(raw === null || raw === undefined ? '' : raw).trim().toLowerCase()
+  if (!value) return "Other must be 'web', 'none' or up to three hostnames."
+  if (value === 'web' || value === 'none') return ''
+  const parts = value.split(',').map(part => part.trim())
+  if (parts.some(part => part === '')) return 'Other has an empty entry — remove the stray comma.'
+  if (parts.length > OTHER_MAX_HOSTS) return `Other accepts at most ${OTHER_MAX_HOSTS} hostnames.`
+  for (const host of parts) {
+    if (host === 'web' || host === 'none') return "Other cannot mix 'web'/'none' with hostnames."
+    if (host.length > SOURCE_MAX_CHARS) return `Each hostname must be at most ${SOURCE_MAX_CHARS} characters.`
+    if (!PLAIN_HOST_RE.test(host)) return `Other entry "${host}" must be a bare hostname.`
+  }
+  return ''
+}
+
+function sourceProblems(value) {
+  return {
+    primary: hostProblem('Primary', value.primary),
+    secondary: hostProblem('Secondary', value.secondary),
+    other: otherProblem(value.other)
+  }
+}
+
+function cleanOther(raw) {
+  const value = String(raw === null || raw === undefined ? '' : raw).trim().toLowerCase()
+  if (value === 'web' || value === 'none') return value
+  return value
+    .split(',')
+    .map(part => part.trim())
+    .filter(Boolean)
+    .join(', ')
+}
+
 /** SegmentedControl options are `{ id, label }` (NOT `{ value, label }`). */
 const MODES = [
   { id: 'standard', label: 'Standard' },
@@ -87,6 +147,10 @@ const statusQuery = () => rest('/status')
 // do not drop what the user typed. Handlers read it with .get().
 const formAtom = atom({ ...DEFAULTS })
 const logsOpenAtom = atom(false)
+// Developer section: collapsed by default; `sourcesAtom` holds the uncommitted
+// edit (null = show what the profile currently has).
+const devOpenAtom = atom(false)
+const sourcesAtom = atom(null)
 
 let storage = null
 let osOpen = () => false
@@ -122,13 +186,17 @@ function fmtTime(value) {
 
 // ── layout atoms ────────────────────────────────────────────────────────────
 
-function Field({ label, hint, children }) {
+function Field({ label, hint, error, children }) {
   return jsxs('div', {
     className: 'flex flex-col gap-1',
     children: [
       jsx('div', { className: 'text-xs font-medium text-(--ui-text-secondary)', children: label }),
       children,
-      hint ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: hint }) : null
+      error
+        ? jsx('div', { className: 'text-[0.6875rem] text-destructive', children: error })
+        : hint
+          ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: hint })
+          : null
     ]
   })
 }
@@ -428,6 +496,145 @@ function LogsSection() {
   })
 }
 
+// ── developer: research sources ─────────────────────────────────────────────
+
+/**
+ * Per-profile research sources (v1.3). Collapsed by default so the setup page
+ * stays novice-friendly; the values are read from `GET /status.sources` and
+ * saved with `POST /sources` for the profile named in the form above.
+ */
+function DeveloperSection({ status, profile }) {
+  const open = useValue(devOpenAtom)
+  const draft = useValue(sourcesAtom)
+  const statusProfile = status && status.data ? status.data.profile : null
+  // Only trust /status when it answered for the profile this form names —
+  // otherwise the page would show another profile's sources as current.
+  const matchesProfile = !statusProfile || statusProfile === profile
+  const live = (matchesProfile && status && status.data && status.data.sources) || SOURCES_DEFAULTS
+  const liveKnown = matchesProfile && Boolean(status && status.data && status.data.sources)
+  const value = draft || { primary: live.primary, secondary: live.secondary, other: live.other }
+  const problems = sourceProblems(value)
+  const invalid = Boolean(problems.primary || problems.secondary || problems.other)
+
+  const save = useMutation({
+    mutationFn: body => rest('/sources', { method: 'POST', body, timeoutMs: 15000 }),
+    onSuccess: () => {
+      sourcesAtom.set(null)
+      queryClient.invalidateQueries({ queryKey: STATUS_KEY })
+    }
+  })
+
+  const edit = (key, next) => sourcesAtom.set({ ...value, [key]: next })
+  const submit = () =>
+    save.mutate({
+      profile,
+      primary: String(value.primary || '').trim().toLowerCase(),
+      secondary: String(value.secondary || '').trim().toLowerCase(),
+      other: cleanOther(value.other)
+    })
+  const resetToDefaults = () => save.mutate({ profile, reset: true })
+
+  const errorText = save.isError && save.error ? String((save.error && save.error.message) || save.error) : null
+  const saved = save.data && save.data.sources ? save.data.sources : null
+
+  return jsxs(Section, {
+    title: 'Developer',
+    description: 'Where in-game answers may look things up. Saved per profile; the next message uses it.',
+    children: [
+      jsx(Button, {
+        size: 'xs',
+        variant: 'outline',
+        onClick: () => devOpenAtom.set(!devOpenAtom.get()),
+        children: open ? 'Hide developer options' : 'Show developer options'
+      }),
+      jsx('div', {
+        className: 'text-[0.6875rem] text-(--ui-text-tertiary)',
+        children: liveKnown
+          ? `Primary ${dash(live.primary)} · secondary ${dash(live.secondary)} · other ${dash(live.other)}`
+          : "Current: not loaded yet — save, then reopen to see this profile's stored values"
+      }),
+      open
+        ? jsxs('div', {
+            className: 'flex flex-col gap-3',
+            children: [
+              jsxs('div', {
+                className: 'grid grid-cols-1 gap-3 md:grid-cols-3',
+                children: [
+                  jsx(Field, {
+                    label: 'Primary source',
+                    hint: 'Searched first. A hostname, optionally with a path.',
+                    error: problems.primary || null,
+                    children: jsx(Input, {
+                      value: value.primary,
+                      placeholder: SOURCES_DEFAULTS.primary,
+                      onChange: e => edit('primary', e.target.value)
+                    })
+                  }),
+                  jsx(Field, {
+                    label: 'Secondary source',
+                    hint: 'Searched when the primary has nothing.',
+                    error: problems.secondary || null,
+                    children: jsx(Input, {
+                      value: value.secondary,
+                      placeholder: SOURCES_DEFAULTS.secondary,
+                      onChange: e => edit('secondary', e.target.value)
+                    })
+                  }),
+                  jsx(Field, {
+                    label: 'Other',
+                    hint: "web (general search), none, or up to 3 hostnames separated by commas.",
+                    error: problems.other || null,
+                    children: jsx(Input, {
+                      value: value.other,
+                      placeholder: SOURCES_DEFAULTS.other,
+                      onChange: e => edit('other', e.target.value)
+                    })
+                  })
+                ]
+              }),
+              jsx('div', {
+                className: 'text-[0.6875rem] text-(--ui-text-tertiary)',
+                children: 'Replies that used a lookup end with one plain line: Source: <domain>.'
+              }),
+              jsxs('div', {
+                className: 'flex items-center gap-2',
+                children: [
+                  jsx(Button, {
+                    size: 'xs',
+                    disabled: invalid || save.isPending,
+                    onClick: submit,
+                    children: save.isPending ? 'Saving…' : 'Save sources'
+                  }),
+                  jsx(Button, {
+                    size: 'xs',
+                    variant: 'ghost',
+                    disabled: save.isPending,
+                    onClick: resetToDefaults,
+                    children: 'Reset to defaults'
+                  }),
+                  errorText ? jsx(Badge, { variant: 'destructive', children: 'sources not saved' }) : null,
+                  saved && !errorText ? jsx(Badge, { variant: 'success', children: 'saved' }) : null
+                ]
+              }),
+              errorText
+                ? jsx('div', {
+                    className: 'select-text break-words text-[0.6875rem] text-destructive',
+                    children: errorText
+                  })
+                : null,
+              saved
+                ? jsx('div', {
+                    className: 'text-[0.6875rem] text-(--ui-text-tertiary)',
+                    children: `Saved: primary ${dash(saved.primary)} · secondary ${dash(saved.secondary)} · other ${dash(saved.other)}`
+                  })
+                : null
+            ]
+          })
+        : null
+    ]
+  })
+}
+
 // ── page ────────────────────────────────────────────────────────────────────
 
 function Page() {
@@ -520,7 +727,7 @@ function Page() {
               }),
               jsx(Field, {
                 label: 'CurseForge API key (optional)',
-                hint: 'Only needed for automatic addon installs. Stored once for every Hermes profile on this machine (one shared key file), never shown again. Leave blank for guided links.',
+                hint: 'Only needed for automatic addon installs. Saved as a Hermes secret in the selected profile (this profile only), never shown again. Leave blank to keep the current key or use guided links.',
                 children: jsxs('div', {
                   className: 'flex items-center gap-2',
                   children: [
@@ -611,6 +818,13 @@ function Page() {
       jsx(Separator, {}),
 
       jsx(LogsSection, {}),
+
+      jsx(Separator, {}),
+
+      jsx(DeveloperSection, {
+        status,
+        profile: form.profile.trim() || DEFAULTS.profile
+      }),
 
       jsx('div', {
         className: 'text-[0.6875rem] text-(--ui-text-tertiary)',

@@ -60,15 +60,207 @@ local function safeCall(fn, ...)
     return secretGuard(value)
 end
 
+-- pcall for multi-return getters (GetProfessions, GetProfessionInfo): the first
+-- value alone is useless, and every value needs the secret check.
+local function safeCallN(fn, ...)
+    if type(fn) ~= "function" then return nil end
+    local results = { pcall(fn, ...) }
+    if not results[1] then return nil end
+    return secretGuard(results[2]), secretGuard(results[3]), secretGuard(results[4]),
+        secretGuard(results[5]), secretGuard(results[6]), secretGuard(results[7])
+end
+
 local function fmtCoord(v)
     if type(v) ~= "number" then return nil end
     return string.format("%.1f", v * 100)
 end
 
-ns.Context = {}
+-- Byte-exact UTF-8 cut (Lua 5.1 strings are byte strings; never split a sequence).
+local function utf8Cut(text, maxBytes)
+    if #text <= maxBytes then return text end
+    local n = maxBytes
+    while n > 0 do
+        local firstRemoved = text:byte(n + 1)
+        if firstRemoved == nil then break end
+        if firstRemoved < 0x80 or firstRemoved >= 0xC0 then break end
+        n = n - 1
+    end
+    if n <= 0 then return "" end
+    return text:sub(1, n)
+end
+
+-- A single `k=v` value: `;` would split the pair list, `=` would split key from
+-- value, `|` reads as a list separator downstream, and any control byte (newlines
+-- included) would break the record text. Mirrors Quest.lua's cleanText.
+local function cleanValue(value)
+    if value == nil then return nil end
+    if type(value) == "number" then value = tostring(value) end
+    if type(value) ~= "string" then return nil end
+    value = value:gsub("[;=|]", " ")
+        :gsub("[%c]", " ")
+        :gsub("%s+", " ")
+        :gsub("^%s+", "")
+        :gsub("%s+$", "")
+    if value == "" then return nil end
+    return value
+end
+
+local Context = {}
+ns.Context = Context
+
+Context.MAX_BYTES = 350           -- whole `k` text budget (v1.3, PROTOCOL A.1)
+Context.MAX_PROF_BYTES = 80       -- `prof`
+Context.MAX_QUEST_BYTES = 60      -- `quest`
+-- Resend gate granularity: xp moves with every kill, so the *signature* rounds it
+-- (see Context.Signature); the resent text still carries the exact value.
+Context.XP_STEP = 5
+Context.RESTED_STEP = 10
+
+-- ------------------------------------------------------------------ context fields
+-- Each getter returns `value, reason`: the value when it is usable, otherwise nil
+-- plus a short reason for the `/h selftest` readout. Everything is feature-detected
+-- (a missing global is "unavailable", never an error) and every returned value is
+-- pcall- + secret-guarded.
+--
+-- WoW globals that the API annotations do not cover are read with rawget(_G, …),
+-- the idiom ChatTab/Options/Scrollbar already use for the same reason.
+
+-- Primary professions with rank: `Mining 12/75,Skinning 30/75`, capped at 80 bytes.
+-- GetProfessions returns profession *indices* (Camelot/Forever: prim1, prim2, then
+-- five secondary slots — Blizzard_Professions/Camelot/Blizzard_ProfessionsFrame.lua:5).
+-- GetProfessionInfo(index) -> name, texture, rank, maxRank, …
+-- (Blizzard_ProfessionsBook/Camelot/Blizzard_ProfessionsBook.lua:55).
+local function wowGlobal(name)
+    return rawget(_G, name)
+end
+
+local function professionsValue()
+    local getProfs, getInfo = wowGlobal("GetProfessions"), wowGlobal("GetProfessionInfo")
+    if type(getProfs) ~= "function" then return nil, "GetProfessions absent" end
+    if type(getInfo) ~= "function" then return nil, "GetProfessionInfo absent" end
+    local first, second = safeCallN(getProfs)
+    local parts = {}
+    for _, index in ipairs({ first or 0, second or 0 }) do
+        if type(index) == "number" and index > 0 then
+            local name, _, rank, maxRank = safeCallN(getInfo, index)
+            name = cleanValue(name)
+            if name then
+                if type(rank) == "number" and type(maxRank) == "number" and maxRank > 0 then
+                    name = name .. " " .. string.format("%d/%d", rank, maxRank)
+                end
+                local candidate = (#parts > 0) and (table.concat(parts, ",") .. "," .. name) or name
+                if #candidate <= Context.MAX_PROF_BYTES then parts[#parts + 1] = name end
+            end
+        end
+    end
+    if #parts == 0 then return nil, "no profession" end
+    return table.concat(parts, ",")
+end
+
+-- Free slots across the backpack and the equipped bags. Bag indices are
+-- 0..NUM_BAG_SLOTS (Enum.BagIndex.Backpack = 0, Bag_1..Bag_4 = 1..4) plus the
+-- reagent bag at Enum.BagIndex.ReagentBag = 5 when Forever has one
+-- (BagIndexConstantsDocumentation.lua:25-31, Blizzard_FrameXMLBase/Constants.lua:165-170).
+-- An empty bag slot returns nil from the getter, so it simply contributes nothing.
+local function freeBagSlots()
+    local container = wowGlobal("C_Container")
+    if type(container) ~= "table" or type(container.GetContainerNumFreeSlots) ~= "function" then
+        return nil, "C_Container.GetContainerNumFreeSlots absent"
+    end
+    local getFree = container.GetContainerNumFreeSlots
+    local bagIndex = wowGlobal("Enum")
+    bagIndex = (type(bagIndex) == "table" and type(bagIndex.BagIndex) == "table")
+        and bagIndex.BagIndex or nil
+    local first = 0
+    if bagIndex and type(bagIndex.Backpack) == "number" then
+        first = bagIndex.Backpack
+    elseif type(wowGlobal("BACKPACK_CONTAINER")) == "number" then
+        first = wowGlobal("BACKPACK_CONTAINER")
+    end
+    local last = tonumber(wowGlobal("NUM_BAG_SLOTS")) or (first + 4)
+    local total, seen = 0, false
+    for i = first, last do
+        local free = safeCall(getFree, i)
+        if type(free) == "number" and free >= 0 then
+            total, seen = total + free, true
+        end
+    end
+    local reagentSlots = tonumber(wowGlobal("NUM_REAGENTBAG_SLOTS")) or 0
+    local reagentIndex = bagIndex and bagIndex.ReagentBag or nil
+    if reagentSlots > 0 and type(reagentIndex) == "number" then
+        local free = safeCall(getFree, reagentIndex)
+        if type(free) == "number" and free >= 0 then
+            total, seen = total + free, true
+        end
+    end
+    if not seen then return nil, "no bag slots readable" end
+    return total
+end
+
+-- UnitXP / UnitXPMax (UnitDocumentation.lua:3474 / :3489, both
+-- SecretArguments = AllowedWhenUntainted) as a whole percent of the current level.
+local function xpPercent()
+    local current = safeCall(wowGlobal("UnitXP"), "player")
+    local maximum = safeCall(wowGlobal("UnitXPMax"), "player")
+    if type(current) ~= "number" then return nil, "UnitXP unavailable" end
+    if type(maximum) ~= "number" or maximum <= 0 then return nil, "UnitXPMax unavailable" end
+    local pct = math.floor(current * 100 / maximum + 0.5)
+    if pct < 0 then pct = 0 elseif pct > 100 then pct = 100 end
+    return pct, string.format("raw %d/%d", current, maximum)
+end
+
+-- GetXPExhaustion() -> rested xp in points, nil when nothing is rested
+-- (PlayerScriptDocumentation.lua:1168). Reported as a whole percent of the level.
+local function restedPercent()
+    local getExhaustion = wowGlobal("GetXPExhaustion")
+    if type(getExhaustion) ~= "function" then return nil, "GetXPExhaustion absent" end
+    local rested = safeCall(getExhaustion)
+    if type(rested) ~= "number" then return nil, "no rest" end
+    if rested <= 0 then return nil, "0 rested" end
+    local maximum = safeCall(wowGlobal("UnitXPMax"), "player")
+    if type(maximum) ~= "number" or maximum <= 0 then return nil, "UnitXPMax unavailable" end
+    local pct = math.floor(rested * 100 / maximum + 0.5)
+    if pct < 1 then return nil, "under 1%" end
+    return pct, string.format("raw %d", rested)
+end
+
+-- Super-tracked quest, else the first watched quest: `<questID>:<title>`, 60 bytes.
+-- Quest.TrackedQuestID already implements that selection (Quest.lua:106) and
+-- C_QuestLog.GetTitleForQuestID is the title source (QuestLogDocumentation.lua:668).
+local function questKey()
+    local quest = ns.Quest
+    if type(quest) ~= "table" or type(quest.TrackedQuestID) ~= "function" then
+        return nil, "Quest module unavailable"
+    end
+    local ok, questID = pcall(quest.TrackedQuestID)
+    if not ok or type(questID) ~= "number" or questID <= 0 then
+        return nil, "no tracked quest"
+    end
+    local log = wowGlobal("C_QuestLog")
+    local title
+    if type(log) == "table" then
+        local raw = safeCall(log.GetTitleForQuestID, questID)
+        if type(raw) == "string" then title = raw end
+        if not title and type(log.GetLogIndexForQuestID) == "function" then
+            local index = safeCall(log.GetLogIndexForQuestID, questID)
+            if type(index) == "number" then
+                local info = safeCall(log.GetInfo, index)
+                if type(info) == "table" then
+                    local rawTitle = secretGuard(info.title)
+                    if type(rawTitle) == "string" then title = rawTitle end
+                end
+            end
+        end
+    end
+    title = cleanValue(title)
+    if not title then return nil, "no title for " .. tostring(questID) end
+    return utf8Cut(string.format("%d:%s", questID, title), Context.MAX_QUEST_BYTES), "id " .. tostring(questID)
+end
 
 -- Current game context as a `k=v;…` string (PROTOCOL A.1 kind `k`).
-function ns.Context.Build()
+Context.DROP_ORDER = { "quest", "prof", "rested", "bags", "xp" }
+
+function Context.Build()
     local pairs_ = {}
     local function add(key, value)
         if value ~= nil and value ~= "" then pairs_[#pairs_ + 1] = { key, tostring(value) } end
@@ -107,11 +299,68 @@ function ns.Context.Build()
     add("instance", inInstance and 1 or 0)
     add("lockdown", (safeCall(C_ChatInfo and C_ChatInfo.InChatMessagingLockdown)) and 1 or 0)
 
-    return Codec.format_kv(pairs_)
+    -- v1.3 (WS-W): appended after the original 11 keys, because an older adapter
+    -- keeps only the first N fields of the record.
+    add("prof", (professionsValue()))
+    add("bags", (freeBagSlots()))
+    add("xp", (xpPercent()))
+    add("rested", (restedPercent()))
+    add("quest", (questKey()))
+
+    local text = Codec.format_kv(pairs_)
+    -- Hard budget: shed the optional tail, cheapest-to-lose first, never an original key.
+    for _, key in ipairs(Context.DROP_ORDER) do
+        if #text <= Context.MAX_BYTES then break end
+        local kept = {}
+        for _, pair in ipairs(pairs_) do
+            if pair[1] ~= key then kept[#kept + 1] = pair end
+        end
+        pairs_ = kept
+        text = Codec.format_kv(pairs_)
+    end
+    return text
 end
 
-function ns.Context.Signature(text)
-    return text
+-- Resend gate. The bridge keeps the last `k` per character, so a change means a
+-- fresh ~200 B record in the next frame; xp and rested move on every kill. Round
+-- those two down to a step for the *comparison* only — the text that is actually
+-- sent still carries the exact value. 5 % of a level is finer than any advice that
+-- depends on it, and the level itself (`lvl`) is an exact key.
+function Context.Signature(text)
+    text = tostring(text or "")
+    if text == "" then return "" end
+    local fields = Codec.parse_kv(text)
+    local function bucket(key, step)
+        local n = tonumber(fields[key])
+        if n then fields[key] = tostring(math.floor(n / step) * step) end
+    end
+    bucket("xp", Context.XP_STEP)
+    bucket("rested", Context.RESTED_STEP)
+    local ordered = {}
+    for key, value in pairs(fields) do ordered[#ordered + 1] = { key, value } end
+    table.sort(ordered, function(a, b) return a[1] < b[1] end)
+    return Codec.format_kv(ordered)
+end
+
+-- Dev aid for `/h selftest`: one line per v1.3 field with its value or the reason
+-- it is missing, plus the rendered size. The first in-game screenshot then shows
+-- exactly which of these APIs return usable values on the live client.
+function Context.SelftestLines()
+    local lines = {}
+    local function line(key, value, reason)
+        if value ~= nil then
+            lines[#lines + 1] = ("ctx %s=%s"):format(key, tostring(value))
+        else
+            lines[#lines + 1] = ("ctx %s: %s"):format(key, tostring(reason or "unavailable"))
+        end
+    end
+    line("prof", professionsValue())
+    line("bags", freeBagSlots())
+    line("xp", xpPercent())
+    line("rested", restedPercent())
+    line("quest", questKey())
+    lines[#lines + 1] = ("ctx bytes=%d cap=%d"):format(#Context.Build(), Context.MAX_BYTES)
+    return lines
 end
 
 -- ------------------------------------------------------------------ helpers
@@ -193,6 +442,15 @@ local function appendOutboxRecord(id, kind, text)
     d.outbox[#d.outbox + 1] = { id = id, chat = History.CHAT, kind = kind, text = text, t = time() }
 end
 
+-- Move a strip queue item into the A.5 SavedVariables outbox without changing
+-- its id. If the bridge already decoded the visible frame, its normal dedupe
+-- prevents a second submission after /reload.
+local function appendReloadItem(item, id)
+    if item.kind == "m" and item.quest then appendOutboxRecord(id, "q", item.quest) end
+    appendOutboxRecord(id, item.kind, item.text or "")
+    if item.kind == "m" then History.Update(id, { status = "queued" }, "user") end
+end
+
 -- User message. Returns true or false, reason.
 -- `opts.silent` sends the record without putting it in the transcript or the
 -- Hermes chat tab — used by Display:NewSession for `/new`, where the addon wants
@@ -203,10 +461,15 @@ function Outbox:SubmitMessage(text, opts)
     opts = opts or {}
     local silent = opts.silent == true
 
-    local context
+    local context, contextSig
     if Outbox.SendContext() then
         local ctx = ns.Context.Build()
-        if ctx ~= "" and ctx ~= self.lastContextSig then context = ctx end
+        if ctx ~= "" then
+            local sig = ns.Context.Signature(ctx)
+            if sig ~= self.lastContextSig then
+                context, contextSig = ctx, sig
+            end
+        end
     end
 
     -- PROTOCOL A.1 kind `q`: only when the snapshot changed since the last one sent.
@@ -246,10 +509,7 @@ function Outbox:SubmitMessage(text, opts)
         -- then the quest snapshot; only then refuse.
         if context then
             payload = buildPayload({ kind = "m", text = text, quest = quest }, id)
-            if #payload <= Codec.MAX_PAYLOAD then context = nil
-            else
-                context = nil
-            end
+            context, contextSig = nil, nil
         end
         if #payload > Codec.MAX_PAYLOAD and quest then
             payload = buildPayload({ kind = "m", text = text, context = context }, id)
@@ -268,7 +528,7 @@ function Outbox:SubmitMessage(text, opts)
         kind = "m",
         text = text,
         context = context,
-        ctxSig = context,
+        ctxSig = contextSig,
         quest = quest,
         qSig = quest,
         preallocatedId = id,
@@ -350,6 +610,34 @@ function Outbox:Redraw()
     local inf = self.inflight
     if not inf or not Outbox.UseStrip() then return end
     Strip:ShowFrame(inf.frame, #inf.payload)
+end
+
+-- Apply a live transport change to work that was already queued. In particular,
+-- reload mode must take the pixels down immediately; waiting for the old ack
+-- path leaves the last frame visible and strands later records in a hidden
+-- in-flight slot.
+function Outbox:OnTransportChanged()
+    if Outbox.UseStrip() then
+        self:Redraw()
+        return
+    end
+
+    Strip:Hide()
+    self:StopTicker()
+    local pending = {}
+    if self.inflight then pending[#pending + 1] = { item = self.inflight.item, id = self.inflight.id } end
+    for _, item in ipairs(self.queue) do pending[#pending + 1] = { item = item } end
+    self.inflight = nil
+    self.queue = {}
+
+    for _, pendingItem in ipairs(pending) do
+        local item = pendingItem.item
+        local id = pendingItem.id or item.preallocatedId or Outbox.AllocId()
+        item.id = id
+        appendReloadItem(item, id)
+        if item.qSig then self.lastQuestSig = item.qSig end
+    end
+    if #pending > 0 and ns.Display and ns.Display.Refresh then ns.Display:Refresh() end
 end
 
 function Outbox:Complete(ok)

@@ -33,7 +33,7 @@ local DEFAULTS = {
     transport = "strip",
     sendContext = true,
     autoOpen = true,      -- open the in-game window on /h <text> and when a reply lands
-    gamepadNav = false,   -- opt-in: FrameControlsManager registration caused ADDON_ACTION_FORBIDDEN
+    gamepadNav = false,   -- legacy flag; unsafe FrameControlsManager integration is removed
     echoReplies = true,   -- also print each finished reply in the chat frame
     stripDebug = false,
     opacity = 0.9,
@@ -239,6 +239,14 @@ function Core.SelfTestLines()
         tostring(lockdown), tostring(WoWHermesDB and WoWHermesDB.settings
             and WoWHermesDB.settings.transport),
         Inbox:PendingCount(), #Outbox.queue, Outbox.inflight and "+1" or "")
+
+    -- v1.3 rich context: each field's value or why it is missing (WS-W).
+    local ctxLines = (ns.Context and ns.Context.SelftestLines) and ns.Context.SelftestLines() or {}
+    for i = 1, #ctxLines do lines[#lines + 1] = ctxLines[i] end
+    -- WS-V: map-pin API presence + the live best map/canSet answer (Q1).
+    if ns.MapPin and type(ns.MapPin.SelftestLines) == "function" then
+        for _, line in ipairs(ns.MapPin.SelftestLines()) do lines[#lines + 1] = line end
+    end
 
     return lines
 end

@@ -1,7 +1,7 @@
 name: wow
 label: World of Warcraft
 kind: platform
-version: 0.2.0
+version: 0.2.1
 manifest_version: 2
 api_version: 1
 requires_hermes: ">=0.22.7"
@@ -52,7 +52,7 @@ config_schema:
     description: "How long /mode full stays on before it lapses back to standard"
 requires_env:
   - name: WOW_BRIDGE_TOKEN
-    description: "Shared secret the bridge presents as 'Authorization: Bearer ...' (auto-generated in memory when unset)"
+    description: "Shared secret the bridge presents as 'Authorization: Bearer $WOW_BRIDGE_TOKEN' (auto-generated in memory when unset)"
     prompt: "WoW bridge bearer token"
     password: true
 optional_env:
@@ -73,7 +73,7 @@ optional_env:
     prompt: "Allow all characters? (true/false)"
     password: false
   - name: WOW_CURSEFORGE_API_KEY
-    description: "The player's own CurseForge Core API key — normally saved once per machine in plugin-data/wow/curseforge.key; this profile env is only a fallback (never returned)"
+    description: "The player's own CurseForge Core API key, stored as a profile-scoped Hermes secret (WOW_CURSEFORGE_API_KEY in the selected profile); no plugin-managed key file (never returned)"
     prompt: "CurseForge API key"
     password: true
   - name: WOW_HOME_CHANNEL

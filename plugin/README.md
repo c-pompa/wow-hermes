@@ -12,6 +12,10 @@ Hermes catalog entry for this plugin has been prepared but **is not listed yet**
 until a maintainer merges it, install from this repository at a pinned commit as
 shown below.
 
+**Quick links:** [v0.2.1 release](https://github.com/c-pompa/wow-hermes/releases/tag/v0.2.1) ·
+[Hermes catalog PR #154256](https://github.com/NousResearch/hermes-agent/pull/154256) ·
+[CurseForge listing/setup text](docs/CURSEFORGE.md) · [Issues](https://github.com/c-pompa/wow-hermes/issues)
+
 ## What you get
 
 - **In-game chat platform for Hermes** — `kind: platform` gateway adapter with a
@@ -32,6 +36,14 @@ shown below.
 - **Addon management** — search CurseForge for Forever-compatible addons,
   queue an install for the bridge, and uninstall by moving the folder to a
   removal backup. The player confirms every write in game.
+
+## In-game evidence
+
+![WoW Hermes minimap button in World of Warcraft: Forever](docs/images/in-game-minimap.png)
+
+This is a real, unretouched pre-release capture of the WoW: Forever minimap area.
+It shows the button's former placeholder icon; the shipped addon uses the Hermes
+portrait icon. No finished-window screenshot is claimed from this older capture.
 
 ## Requirements
 
@@ -112,10 +124,10 @@ Expected: `{"ok": true, "platform": "wow", "version": 1, ...}`. A second
 gateway cannot bind the same host:port; give each profile its own `WOW_PORT`.
 
 `WOW_BRIDGE_TOKEN` is the shared secret the bridge sends as
-`Authorization: Bearer …`. If it is unset the adapter generates one in memory
-at startup and the bridge cannot know it, so set it explicitly. The character
-name is asserted by the bridge, not by Blizzard; the token is the only real
-authentication boundary.
+`Authorization: Bearer $WOW_BRIDGE_TOKEN`. If it is unset the adapter generates
+one in memory at startup and the bridge cannot know it, so set it explicitly.
+The character name is asserted by the bridge, not by Blizzard; the token is the
+only real authentication boundary.
 
 ## Install the addon and the bridge
 
@@ -124,7 +136,8 @@ game window, decodes chat, forwards it to Hermes, and writes replies back into
 the addon's slot files in the WoW `AddOns` tree. It also installs the addon and
 its 256 load-on-demand slot addons.
 
-Download `wowhermes-bridge-v0.2.0.zip` from the release and extract it. The
+Download [`wowhermes-bridge-v0.2.1.zip`](https://github.com/c-pompa/wow-hermes/releases/download/v0.2.1/wowhermes-bridge-v0.2.1.zip)
+from the [v0.2.1 release](https://github.com/c-pompa/wow-hermes/releases/tag/v0.2.1) and extract it. The
 bundle includes the addon, locked bridge source and a PowerShell bootstrap. From
 the extracted directory, run:
 
@@ -177,10 +190,11 @@ entry and the upstream pull request.
   not permanently delete it.
 - **Outbound network.** The bridge makes HTTP requests to the Hermes host you
   configure. The plugin makes CurseForge API calls (`api.curseforge.com`) with
-  your key. The key is stored once per machine at
-  `plugin-data/wow/curseforge.key` (mode `0600`), with the profile's
-  `WOW_CURSEFORGE_API_KEY` as a fallback; it is never returned to the model or
-  logged.
+  your key. The key is stored as a profile-scoped Hermes secret
+  (`WOW_CURSEFORGE_API_KEY` in the selected profile's secret store); there is no
+  plugin-managed credential file. It is never returned to the model or logged.
+  **Upgrading from 0.2.0:** the retired machine-wide `curseforge.key` file is
+  neither read nor deleted; re-enter the key once in the selected profile's setup.
 - **Model provider.** Chat text and tool results from the game go to whichever
   model provider the `wow` Hermes profile is configured to use — cloud or
   local. That provider's data-handling terms apply, and token spend is yours.

@@ -3,8 +3,48 @@
 All notable changes to WoWHermes are recorded here. The project ships three components
 that version independently but are released together: the Hermes plugin `wow`, the WoW
 Forever addon `WoWHermes`, and the Windows bridge `wowhermes-bridge`. Release tags use
-the plugin version (`v0.2.0`); `release-manifest.json` records each component's source
+the plugin version (`v0.2.1`); `release-manifest.json` records each component's source
 version inside that release.
+
+## [v0.2.1] — 2026-11-12
+
+Catalog-compliance and live-fix release. The CurseForge key moved to profile-scoped
+Hermes secret storage so the plugin meets Hermes catalog admission rule 11
+(credentials through `agent.secret_scope.get_secret`, never a plugin-managed file).
+
+### Migration — CurseForge key (action required once)
+
+- **The v0.2.0 machine-wide key file is no longer read.** `plugin-data/wow/curseforge.key` is
+  ignored by the plugin and is **not deleted** — the user's existing key stays on disk untouched.
+- **Re-enter the key once in the desktop setup page** (or `POST /api/plugins/wow/setup` with
+  `curseforge_api_key`). It is now saved as `WOW_CURSEFORGE_API_KEY` in the **selected profile**,
+  the same Hermes secret store as `WOW_BRIDGE_TOKEN`. Each profile that needs one-click addon
+  installs needs its own entry.
+- Blank leaves the stored value unchanged; `"clear"` removes it from the selected profile only;
+  saving the identical value is a no-op. `/status` reports only `curseforge_key_set` and
+  `curseforge_key_scope` (`profile` | `null`) and never key material.
+- Runtime tools resolve the key only through `agent.secret_scope.get_secret(...)` (falling back to
+  Hermes's scoped `get_scoped_secret` helper), so a multiplexed gateway cannot borrow another
+  profile's value.
+
+### Changed
+
+- Plugin `wow` **0.2.1**, addon `WoWHermes` **0.2.1**, bridge `wowhermes-bridge` **0.2.1**.
+- Removed `hermes_plugin/wow/curseforge_key.py` and its shared-file tests; added scoped
+  resolution/save/clear/idempotence tests that assert no reads/writes outside the selected profile.
+- Manifest, backend/dashboard docstrings, public README and the catalog entry now describe
+  profile-scoped Hermes secret storage with no plugin-managed credential file.
+- Fixed malformed bearer-token documentation to `Authorization: Bearer $WOW_BRIDGE_TOKEN`.
+- Catalog `known_issues` documents the one-time key re-entry after upgrade.
+
+### Fixed
+
+- Windows Graphics Capture now crops window decorations before decoding the client-area strip;
+  verified against a real windowed Forever capture.
+- The addon clears a stale strip when its transport changes and no longer registers the custom
+  gamepad manager. Transport-switch and strip-clearing regressions are covered by the Lua suite.
+- Public onboarding links now point to the live repository and `v0.2.1` downloads; CurseForge
+  staging metadata no longer describes those links as placeholders.
 
 ## [v0.2.0] — 2026-11-11
 

@@ -88,7 +88,10 @@ RETENTION_SECONDS = 24 * 3600.0
 DEDUP_WINDOW_SECONDS = 3600
 DEDUP_MAX_SIZE = 5000
 TYPING_MIN_INTERVAL = 3.0        # seconds between typing frames per character
-MAX_CONTEXT_FIELDS = 8
+# The addon sends ~11 context fields (zone…lvl, class, race, money, coords,
+# combat, instance, lockdown) and may grow; a cap of 8 silently dropped combat,
+# instance and lockdown (v1.3 F5). Keep the per-key/per-value caps below.
+MAX_CONTEXT_FIELDS = 20
 # A turn that has not finished within this many seconds is a stuck turn — unless it
 # really owns live async work (see ``active_work_for_session``), in which case the
 # deadline is extended instead of cancelling real work.
@@ -249,6 +252,7 @@ def _load_sibling(name: str):
 
 modes = _load_sibling("modes")
 normalize_character = modes.normalize_character
+sources = _load_sibling("sources")
 
 
 def context_line(context: Any) -> str:
@@ -272,6 +276,22 @@ def context_line(context: Any) -> str:
             continue
         parts.append(f"{key_text}={value_text}")
     return f"[WoW context: {'; '.join(parts)}]" if parts else ""
+
+
+def sources_line(store: Any) -> str:
+    """``[WoW sources: primary=…; secondary=…; other=…]`` for one inbound turn.
+
+    Read fresh on every message (one ``stat()``; a changed file invalidates the
+    cache), so a Save on the desktop page applies to the very next turn with no
+    gateway restart. An unreadable store falls back to the defaults rather than
+    dropping the line: the agent's research rule should never silently vanish.
+    """
+    try:
+        value = store.load()
+    except Exception:  # pragma: no cover - load() already fails soft
+        logger.debug("[wow] sources store unreadable; using defaults", exc_info=True)
+        value = sources.DEFAULTS
+    return value.context_line()
 
 
 def _floats(value: Any, default: float) -> float:
@@ -423,6 +443,10 @@ class WoWAdapter(BasePlatformAdapter):
         # Per-character modes (v1.1). The store is file-backed under the plugin
         # data dir so a gateway reload keeps every character's mode.
         self._modes = modes.ModeStore(full_ttl_seconds=modes.resolve_full_ttl_seconds())
+        # Research sources (v1.3): per-profile JSON read fresh on every turn. The
+        # store resolves the profile home lazily, so a multiplexed host serves
+        # each profile's own file without freezing the construction-time home.
+        self._sources = sources.SourceStore()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._expiry_handles: dict[str, asyncio.TimerHandle] = {}
 
@@ -597,7 +621,10 @@ class WoWAdapter(BasePlatformAdapter):
         except (OverflowError, OSError, ValueError):
             timestamp = datetime.now(tz=UTC)
         ctx = context_line(payload.get("context"))
-        event_text = f"{ctx}\n{text}" if ctx else text
+        # The research sources ride along on every turn, after the context line.
+        # They are settings for the AGENT only: never echoed to the player.
+        source_hint = sources_line(self._sources)
+        event_text = "\n".join(part for part in (ctx, source_hint, text) if part)
 
         source = self.build_source(
             chat_id=character, chat_name=character, chat_type="dm",

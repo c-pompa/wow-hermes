@@ -38,7 +38,10 @@ end
 local function setTransport(value)
     local s = settings()
     if not s then return end
-    s.transport = (value == 2) and "reload" or "strip"
+    local transport = (value == 2) and "reload" or "strip"
+    if s.transport == transport then return end
+    s.transport = transport
+    if ns.Outbox and ns.Outbox.OnTransportChanged then ns.Outbox:OnTransportChanged() end
     if ns.Print then
         ns.Print(s.transport == "reload"
             and "Reload transport: messages are queued until you /reload."

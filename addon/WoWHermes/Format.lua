@@ -27,6 +27,7 @@ Format.COLORS = {
     code   = "|cff9fe8a0",
     url    = "|cff7fbfff",
     grey   = "|cff8a8a8a",
+    pin    = "|cff66ccff",   -- map coordinate links
 }
 
 -- Literal pipe -> the client's escaped pipe. Applied before any styling.
@@ -35,11 +36,128 @@ function Format.Sanitize(text)
     return (tostring(text):gsub("|", "||"))
 end
 
--- Inline styles on already-sanitized text: `code`, URLs, **bold**.
+-- ------------------------------------------------ map coordinates -> links
+-- WoW map coordinates in a reply become a custom addon hyperlink
+-- (`LinkTypes.AddOn = "addon"`, Blizzard_SharedXML/LinkUtil.lua:4). Detection
+-- runs on ALREADY SANITIZED text: the only real escapes in the output are the
+-- ones this module inserts.
+--
+-- A pair is two numbers in 0..100 separated by a comma, with optional
+-- parentheses: "44.7, 44.5", "(44.7, 44.5)", "44.7,44.5", "44, 45".
+-- Rejected on purpose (false positives seen in real replies):
+--   * thousands separators / money / quantities: "1,500" (500 > 100),
+--     "3, 000" (leading zero), "9s 50c" (no comma)
+--   * a number that is part of a longer token: "144.7, 44.5", "44.7.1, 44.5"
+--   * anything inside a URL: "https://x/44.7,44.5"
+--   * a percentage pair ("44.7, 45%") and anything followed by a unit letter
+Format.PIN_LINK = "addon:WoWHermes:pin:"
+Format.COORD_MAX = 100
+
+local COORD_NUM = "[%d]+%.?[%d]*"
+local COORD_PAIR = "(" .. COORD_NUM .. ")%s*,%s*(" .. COORD_NUM .. ")"
+local UNSAFE_BEFORE = "[%w_%./%-:]"
+local UNSAFE_AFTER = "[%w_/%%%-]"
+
+-- A "." right after a pair is a sentence period unless a digit follows it
+-- ("44.7.1" is a version, "at 44.5." ends a sentence).
+local function badAfter(text, e)
+    local after = text:sub(e + 1, e + 1)
+    if after == "" then return false end
+    if after == "." then return text:sub(e + 2, e + 2):match("%d") ~= nil end
+    return after:match(UNSAFE_AFTER) ~= nil
+end
+
+-- "000", "050", "00" are thousands groups or padding, never a coordinate; a
+-- trailing "." is not a number the client would accept either.
+local function badToken(tok)
+    if tok == "" or tok:sub(-1) == "." then return true end
+    if #tok > 1 and tok:sub(1, 1) == "0" then return true end
+    local v = tonumber(tok)
+    return v == nil or v < 0 or v > Format.COORD_MAX
+end
+
+-- True when the character run immediately before `s` is part of a URL
+-- (scheme + "://" on the same whitespace-delimited token).
+local function inUrl(text, s)
+    local i = s - 1
+    while i >= 1 do
+        local c = text:sub(i, i)
+        if c:match("%s") then return false end
+        if c == ":" and text:sub(i, i + 2) == "://" then return true end
+        i = i - 1
+    end
+    return false
+end
+
+-- Ordered list of { s, e, x, y, label } pairs; x/y are the raw tokens (so the
+-- link displays what the reply said) and label is "x, y".
+function Format.ScanPins(text)
+    local found = {}
+    if type(text) ~= "string" or text == "" then return found end
+    local pos = 1
+    while pos <= #text do
+        local s, e, a, b = text:find(COORD_PAIR, pos)
+        if not s then break end
+        -- `[%d]+%.?[%d]*` swallows a sentence period after the second number
+        -- ("at 30, 40.") — give the period back to the sentence.
+        if b:sub(-1) == "." then
+            b, e = b:sub(1, -2), e - 1
+        end
+        local start, stop = s, e
+        local open = text:sub(s - 1, s - 1) == "("
+        local close = text:sub(e + 1, e + 1) == ")"
+        if open and close then start, stop = s - 1, e + 1 end
+        local before = text:sub(start - 1, start - 1)
+        local ok = not badToken(a) and not badToken(b)
+            and not (before ~= "" and before:match(UNSAFE_BEFORE))
+            and not badAfter(text, stop)
+            and not inUrl(text, start)
+        if ok then
+            found[#found + 1] = { s = start, e = stop, x = a, y = b, label = a .. ", " .. b }
+            pos = stop + 1
+        else
+            pos = s + 1
+        end
+    end
+    return found
+end
+
+-- Coordinates of a message body as numbers, in reading order (the Pin button).
+function Format.PinPairs(text)
+    local pairsList = {}
+    for _, pin in ipairs(Format.ScanPins(text)) do
+        pairsList[#pairsList + 1] = { x = tonumber(pin.x), y = tonumber(pin.y), label = pin.label }
+    end
+    return pairsList
+end
+
+-- One clickable coordinate: the link target carries the two raw values; the
+-- visible text is the bracketed pair in the pin colour.
+function Format.PinLink(x, y)
+    local label = tostring(x) .. ", " .. tostring(y)
+    return Format.COLORS.pin .. "|H" .. Format.PIN_LINK .. tostring(x) .. ":" .. tostring(y)
+        .. "|h[" .. label .. "]|h|r"
+end
+
+local function applyPins(text)
+    local pins = Format.ScanPins(text)
+    if #pins == 0 then return text end
+    local out, pos = {}, 1
+    for _, pin in ipairs(pins) do
+        out[#out + 1] = text:sub(pos, pin.s - 1)
+        out[#out + 1] = Format.PinLink(pin.x, pin.y)
+        pos = pin.e + 1
+    end
+    out[#out + 1] = text:sub(pos)
+    return table.concat(out)
+end
+
+-- Inline styles on already-sanitized text: `code`, URLs, coordinates, **bold**.
 local function inline(text)
     text = text:gsub("`([^`\n]+)`", Format.COLORS.code .. "%1|r")
     text = text:gsub("(https?://[%w%-%._~:/?%#%[%]@!$&'()*+,;=%%]+)",
         Format.COLORS.url .. "%1|r")
+    text = applyPins(text)
     text = text:gsub("%*%*(.-)%*%*", Format.COLORS.gold .. "%1|r")
     return text
 end

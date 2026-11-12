@@ -11,7 +11,17 @@ Contract (research 07 §3.5):
        platform_enabled, platform_toolsets, known_plugin_toolsets, default_mode,
        mode, modes, token_set, curseforge_key_set, curseforge_key_scope,
        connected, listener, listening, bound, last_bridge_hello, last_hello,
-       last_seen, health_error?, character, adapter}`` — never the token or key.
+       last_seen, sources, health_error?, character, adapter}`` — never the
+  token or key. ``sources`` is ``{primary, secondary, other}`` for this profile
+  (defaults when unset), the value the adapter injects on every turn.
+
+``POST /sources`` body ``{profile="wow", primary?, secondary?, other?, reset?}``
+  → ``{ok, profile, sources: {primary, secondary, other}, defaults, changed, reset}``.
+  Saved to the profile's ``plugin-data/wow/sources.json``; blank fields keep the
+  stored value and ``reset: true`` restores the defaults. A value that is not a
+  bare hostname (optionally with a path) — or ``other`` not being ``web``,
+  ``none``, or ≤3 hostnames — is a **400** with a plain message. These strings
+  are interpolated into the agent's prompt, so validation is a hard gate.
 
   ``connected`` / ``listener`` are the desktop's two badges, answered by a live
   ``GET http://<host>:<port>/v1/wow/health`` on the *configured* endpoint (bearer
@@ -28,9 +38,10 @@ Contract (research 07 §3.5):
   → ``{ok, profile, character, created, host, port, default_mode, listening,
        restart_required, curseforge_key, curseforge_key_scope, steps[], token_once?}``.
   ``token_once`` is present only when the token was generated for a new profile or
-  ``rotate_token`` was true. A non-empty ``curseforge_api_key`` is stored once per
-  machine in ``<hermes root>/plugin-data/wow/curseforge.key`` (shared by every
-  profile), not in this profile's ``.env``.
+  ``rotate_token`` was true. A non-empty ``curseforge_api_key`` is saved as the
+  **selected profile's** ``WOW_CURSEFORGE_API_KEY`` Hermes secret (while the
+  profile home override is installed); blank leaves it unchanged and ``"clear"``
+  removes it from that profile only. There is no plugin-managed key file.
 """
 
 from __future__ import annotations
@@ -66,6 +77,20 @@ class SetupBody(BaseModel):
     curseforge_api_key: str = ""
 
 
+class SourcesBody(BaseModel):
+    """``POST /sources`` — the per-profile research sources (v1.3).
+
+    Blank/absent fields keep the stored value; ``reset`` restores the defaults.
+    Values are validated in ``backend_setup.set_sources`` (400 on a bad one).
+    """
+
+    profile: str = "wow"
+    primary: str = ""
+    secondary: str = ""
+    other: str = ""
+    reset: bool = False
+
+
 @router.get("/status")
 async def get_status(
     profile: str = Query("wow", alias="profile"),
@@ -84,4 +109,13 @@ async def post_setup(body: SetupBody) -> dict:
     try:
         return await asyncio.to_thread(backend_setup.setup, payload)
     except backend_setup.SetupError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@router.post("/sources")
+async def post_sources(body: SourcesBody) -> dict:
+    payload = body.model_dump()
+    try:
+        return await asyncio.to_thread(backend_setup.set_sources, payload)
+    except (backend_setup.SetupError, backend_setup.SourceError) as exc:
         raise HTTPException(400, str(exc)) from None

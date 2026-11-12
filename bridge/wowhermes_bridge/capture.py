@@ -431,6 +431,37 @@ class GdiCapture(_WindowBound):
 # ---------------------------------------------------------------- WGC
 
 
+def _wgc_client_layout(
+    frame_width: int,
+    frame_height: int,
+    client_size: tuple[int, int] | None,
+) -> tuple[int, int, int, int]:
+    """Return ``(x, y, width, height)`` for the client inside a WGC window frame.
+
+    WGC can include the non-client window decoration even with ``draw_border=False``.
+    On the live bordered Forever window the 1366x799 frame held a 1364x767 client
+    at (1, 31). The side and bottom borders have the same thickness, so the size
+    delta gives a reliable crop origin; the decoder's small origin scan absorbs a
+    one-pixel rounding difference. Large deltas are DPI scaling, not decoration:
+    retain the physical frame size in that case (the existing DPI fallback).
+    """
+    if client_size is not None:
+        client_w, client_h = client_size
+        extra_w, extra_h = frame_width - client_w, frame_height - client_h
+        # Window borders are tiny; a large mismatch means a logical-pixel client rect.
+        if 0 <= extra_w <= 64 and 0 <= extra_h <= 128:
+            border_x = extra_w // 2
+            origin_y = extra_h - border_x
+            if origin_y >= 0:
+                return (
+                    border_x,
+                    origin_y,
+                    frame_width - 2 * border_x,
+                    frame_height - origin_y - border_x,
+                )
+    return 0, 0, frame_width, frame_height
+
+
 class WgcCapture(_WindowBound):
     """``windows-capture`` 2.x (Windows.Graphics.Capture) on the WoW HWND.
 
@@ -476,6 +507,7 @@ class WgcCapture(_WindowBound):
         self._size = size
         self._frame: np.ndarray | None = None
         self._frame_size: tuple[int, int] | None = None
+        self._content_size: tuple[int, int] | None = None
         self._lock = threading.Lock()
         self._error: str | None = None
         self._closed = False
@@ -540,30 +572,38 @@ class WgcCapture(_WindowBound):
             if buffer.ndim != 3 or buffer.shape[2] < 4:
                 raise ValueError(f"unexpected frame shape {buffer.shape}")
             height, width = buffer.shape[:2]
-            crop_w = min(self._size[0], width)
-            crop_h = min(self._size[1], height)
+            geometry = self._watcher.geometry
+            client = None if geometry is None else (geometry.width, geometry.height)
+            origin_x, origin_y, content_w, content_h = _wgc_client_layout(width, height, client)
+            crop_w = min(self._size[0], content_w)
+            crop_h = min(self._size[1], content_h)
             # BGRA, contiguous copy: the buffer is backed by a native mapped frame that is
-            # recycled as soon as the callback returns.
-            image = np.ascontiguousarray(buffer[:crop_h, :crop_w, :4])
+            # recycled as soon as the callback returns. Crop away any non-client title bar
+            # and borders first so (0, 0) is the addon strip's client-area origin.
+            image = np.ascontiguousarray(
+                buffer[origin_y : origin_y + crop_h, origin_x : origin_x + crop_w, :4]
+            )
             with self._lock:
                 self._frame = image
                 self._frame_size = (width, height)
+                self._content_size = (content_w, content_h)
         except Exception as exc:  # noqa: BLE001
             with self._lock:
                 self._error = str(exc)
 
     # -- capture API --------------------------------------------------------
     def client_size(self) -> tuple[int, int] | None:
-        """Physical client size: the WGC frame's size once frames flow.
+        """Physical client size, excluding any WGC title bar and window borders.
 
         WGC composes the window in *physical* pixels, while ``GetClientRect`` returns logical
         pixels when the process could not become per-monitor DPI aware (``dpi_state()`` says
-        ``already-set``). Taking the frame size keeps the pitch hint correct in that case.
+        ``already-set``). With a large frame/rect mismatch, the physical frame size therefore
+        remains the fallback; a decoration-sized mismatch is cropped by ``_wgc_client_layout``.
         """
         with self._lock:
-            frame_size = self._frame_size
-        if frame_size:
-            return frame_size
+            content_size = self._content_size
+        if content_size:
+            return content_size
         return super().client_size()
 
     def grab(self) -> np.ndarray:
