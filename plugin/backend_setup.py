@@ -24,12 +24,7 @@ Hard rules baked in here:
   it from the selected profile only.
 * ``known_plugin_toolsets.wow = ["wow"]`` is written so the WoW toolset is *off*
   unless a mode names it (research 07 risk 3 — plugin toolsets default ON).
-* A hand-edited ``SOUL.md`` is never overwritten (``<!-- wow:managed:sha=… -->``),
-  and the managed ``wow-player`` skill follows the same marker rule while
-  describing **every** allowlisted character (v1.3 F2).
-* Research sources (v1.3) are a per-profile developer setting stored in
-  ``plugin-data/wow/sources.json`` — see ``sources.py`` for why they are not in
-  ``config.yaml`` (the adapter reads them on every turn, in another process).
+* A hand-edited ``SOUL.md`` is never overwritten (``<!-- wow:managed:sha=… -->``).
 """
 
 from __future__ import annotations
@@ -46,7 +41,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
-from . import modes, sources
+from . import modes
 from .tools import CURSEFORGE_KEY_ENV
 
 PKG_ROOT = Path(__file__).resolve().parent
@@ -65,10 +60,6 @@ _SOUL_MARKER_LINE = re.compile(r"\n?<!--\s*wow:managed[^>]*-->\s*$")
 
 class SetupError(ValueError):
     """Bad request data (the API layer maps it to HTTP 400)."""
-
-
-#: Research-source validation error, re-exported so the API layer has one import.
-SourceError = sources.SourceError
 
 
 # ── profile helpers ─────────────────────────────────────────────────────────
@@ -159,16 +150,14 @@ def _soul_body(text: str) -> str:
 
 def render_soul(character: str, profile: str = DEFAULT_PROFILE,
                 template_path: Optional[Path] = None) -> str:
-    """Render ``SOUL.md.tmpl`` for *character*, with a managed-marker suffix.
-
-    The character key is substituted **verbatim**: ``Player-Realm`` is the key,
-    not a name plus a realm called ``Eater`` (v1.3 F2 — splitting it produced a
-    fake realm in SOUL and in the player skill).
-    """
+    """Render ``SOUL.md.tmpl`` for *character*, with a managed-marker suffix."""
     path = template_path or (PKG_ROOT / "SOUL.md.tmpl")
     template = path.read_text(encoding="utf-8")
+    name, _, realm = character.partition("-")
     rendered = (template.replace("{character}", character)
-                        .replace("{profile}", profile))
+                        .replace("{profile}", profile)
+                        .replace("{realm}", realm or character)
+                        .replace("{name}", name))
     body = _soul_body(rendered)
     marker = f"<!-- wow:managed:sha={_digest(body)} profile={profile} character={character} -->"
     return f"{body}\n{marker}\n"
@@ -182,57 +171,15 @@ def soul_is_ours(existing: str) -> bool:
     return _digest(_soul_body(existing)) == match.group(1)
 
 
-def _clean_characters(characters: Any) -> list[str]:
-    """Normalised, de-duplicated character keys in the caller's order."""
-    raw = characters if isinstance(characters, (list, tuple, set)) else [characters]
-    out: list[str] = []
-    for item in raw:
-        key = modes.normalize_character(item) or ""
-        if key and key not in out:
-            out.append(key)
-    return out
-
-
-def render_profile_skill(characters: Any, profile: str = DEFAULT_PROFILE,
+def render_profile_skill(character: str, profile: str = DEFAULT_PROFILE,
                          template_path: Optional[Path] = None) -> str:
-    """Render the managed ``wow-player`` profile skill for *characters*.
-
-    One section per allowlisted character, each showing the ``Name-Realm`` key
-    verbatim (never split into name + realm). The body carries the same
-    ``<!-- wow:managed:sha=… -->`` contract as SOUL: the setup only rewrites the
-    file while that marker matches the content byte-for-byte.
-    """
     path = template_path or (PKG_ROOT / "profile-skills" / "wow-player" / "SKILL.md")
     template = path.read_text(encoding="utf-8")
-    keys = _clean_characters(characters)
-    listing = "\n".join(f"- `{key}`" for key in keys)
-    inline = ", ".join(f"`{key}`" for key in keys)
-    rendered = (template.replace("{characters}", listing)
-                        .replace("{characters_inline}", inline)
-                        .replace("{profile}", profile))
-    body = _soul_body(rendered)
-    marker = (f"<!-- wow:managed:sha={_digest(body)} profile={profile} "
-              f"characters={','.join(keys)} -->")
-    return f"{body}\n{marker}\n"
-
-
-def skill_is_ours(existing: str) -> bool:
-    """True when the managed player skill still matches its own marker digest."""
-    return soul_is_ours(existing)
-
-
-def _merge_allowed(existing: Any, character: str) -> list[str]:
-    """Existing allowlist keys plus *character* (order preserved, de-duplicated).
-
-    The setup form can add a character but has no removal control, so writing
-    just the submitted one would silently drop every other character of the
-    profile — and the managed skill (v1.3 F2) is rendered from this union.
-    """
-    parts = [part.strip() for part in str(existing or "").split(",") if part.strip()]
-    merged = _clean_characters(parts)
-    if character and character not in merged:
-        merged.append(character)
-    return merged
+    name, _, realm = character.partition("-")
+    return (template.replace("{character}", character)
+                    .replace("{profile}", profile)
+                    .replace("{realm}", realm or character)
+                    .replace("{name}", name))
 
 
 # ── adapters/status ─────────────────────────────────────────────────────────
@@ -421,14 +368,10 @@ def setup(request: dict[str, Any], *, pkg_root: Optional[Path] = None,
     token_once: Optional[str] = None
     token_created = False
 
-    # The profile's allowlist after this Save: every character this profile
-    # answers for, which the managed player skill must describe (v1.3 F2).
-    allowed_out: list[str] = []
-
     _, reset_scope = _home_scope(target)
     try:
         def do_env():
-            nonlocal token_once, token_created, allowed_out
+            nonlocal token_once, token_created
             from hermes_cli.config import remove_env_value, save_env_value
             from gateway.platforms._shared import get_scoped_secret
 
@@ -446,17 +389,8 @@ def setup(request: dict[str, Any], *, pkg_root: Optional[Path] = None,
                 action = "kept"
             save_env_value("WOW_HOST", host)
             save_env_value("WOW_PORT", str(port))
-            # Union, not overwrite: this form can add a character but cannot
-            # express removal, and dropping a second allowlisted character would
-            # lock it out of its own profile.
-            allowed = _merge_allowed(
-                str(get_scoped_secret("WOW_ALLOWED_USERS", "") or ""), character)
-            allowed_out = allowed
-            save_env_value("WOW_ALLOWED_USERS", ",".join(allowed))
-            # Keep an existing home channel (it may be the other character).
-            home = modes.normalize_character(
-                str(get_scoped_secret("WOW_HOME_CHANNEL", "") or "").strip())
-            save_env_value("WOW_HOME_CHANNEL", home or character)
+            save_env_value("WOW_ALLOWED_USERS", character)
+            save_env_value("WOW_HOME_CHANNEL", character)
             remove_env_value("WOW_ALLOW_ALL_USERS")
             return action
 
@@ -521,21 +455,16 @@ def setup(request: dict[str, Any], *, pkg_root: Optional[Path] = None,
             dest = dest_root / "wow-player"
             dest.mkdir(parents=True, exist_ok=True)
             path = dest / "SKILL.md"
-            # Every allowlisted character, not just the one being saved (F2).
-            characters = allowed_out or [character]
-            rendered = render_profile_skill(characters, profile_name,
+            rendered = render_profile_skill(character, profile_name,
                                             template_path=template)
-            existing = ""
-            if path.exists():
-                existing = path.read_text(encoding="utf-8", errors="ignore")
-            if existing == rendered:
+            if path.exists() and path.read_text(encoding="utf-8", errors="ignore") == rendered:
                 return "unchanged"
-            # Same rule as SOUL: only refresh a copy we still own byte-for-byte;
-            # a player-edited skill is kept as-is.
-            if existing.strip() and not skill_is_ours(existing):
+            if path.exists():
+                # A real profile skill is editable; only refresh a byte-identical
+                # previous render (kept in sync by re-render, not forced).
                 return "kept (edited)"
             path.write_text(rendered, encoding="utf-8")
-            return "written" if not existing.strip() else "updated"
+            return "written"
 
         step("env", do_env)
 
@@ -599,7 +528,6 @@ def setup(request: dict[str, Any], *, pkg_root: Optional[Path] = None,
         "ok": all(item["ok"] for item in steps if item["step"] not in {"listener"}),
         "profile": profile_name,
         "character": character,
-        "characters": allowed_out or [character],
         "created": created,
         "host": host,
         "port": port,
@@ -640,7 +568,6 @@ def status(*, profile_name: str = DEFAULT_PROFILE, character: str = "") -> dict[
         "mode": None, "modes": {}, "token_set": False, "listening": False,
         "connected": False, "listener": False,
         "last_bridge_hello": None, "last_hello": None, "last_seen": None,
-        "sources": sources.DEFAULTS.as_dict(),
     }
     if not target.exists():
         out["error"] = "profile does not exist yet — save the setup form first"
@@ -696,9 +623,6 @@ def status(*, profile_name: str = DEFAULT_PROFILE, character: str = "") -> dict[
     # Store + live adapter. The store is read from the target profile's data dir,
     # independent of which profile's gateway hosts this route.
     store_dir = target / "plugin-data" / "wow"
-    # Research sources (v1.3): same per-profile data dir as modes.json, read with
-    # a lenient fallback so a hand-edited file can never break /status.
-    out["sources"] = sources.SourceStore(store_dir).load().as_dict()
     configured_default = str(settings.get("default_mode") or modes.DEFAULT_MODE)
     if configured_default not in {"standard", "wow"}:
         configured_default = modes.DEFAULT_MODE
@@ -740,53 +664,6 @@ def status(*, profile_name: str = DEFAULT_PROFILE, character: str = "") -> dict[
     if snapshot.get("token_set"):
         out["token_set"] = True
     return out
-
-
-def set_sources(request: dict[str, Any]) -> dict[str, Any]:
-    """Save the per-profile research sources (``POST /api/plugins/wow/sources``).
-
-    Body: ``{profile, primary?, secondary?, other?, reset?}``. Idempotent — the
-    same values twice leave the file untouched (``changed: false``). A missing or
-    blank field keeps the stored value; ``reset: true`` restores the defaults and
-    ignores the values. Every value is validated; a bad one raises
-    :class:`sources.SourceError` (the API maps it to 400) instead of being
-    sanitized, because these strings are interpolated into the agent's prompt.
-
-    The write target is the selected profile's ``plugin-data/wow/sources.json``
-    (resolved from ``get_profile_dir``), so the adapter in that profile's gateway
-    picks it up on its next turn without a restart. No secret material is read,
-    written or returned.
-    """
-    req = dict(request or {})
-    profile_name = _canonical_profile(req.get("profile") or req.get("profile_name"))
-    reset = bool(req.get("reset"))
-    profiles = _profiles()
-    target = profiles.get_profile_dir(profile_name)
-    if not target.exists():
-        raise SetupError(f"profile {profile_name!r} does not exist yet — save the setup form first")
-    store = sources.SourceStore(target / "plugin-data" / "wow")
-    if reset:
-        wanted = sources.DEFAULTS
-    else:
-        current = store.load()
-        primary = str(req.get("primary") or "").strip()
-        secondary = str(req.get("secondary") or "").strip()
-        other = str(req.get("other") or "").strip()
-        wanted = sources.Sources(
-            primary=sources.normalize_host(primary, "primary") if primary else current.primary,
-            secondary=(sources.normalize_host(secondary, "secondary") if secondary
-                       else current.secondary),
-            other=sources.normalize_other(other) if other else current.other,
-        )
-    changed = store.save(wanted)
-    return {
-        "ok": True,
-        "profile": profile_name,
-        "sources": wanted.as_dict(),
-        "defaults": sources.DEFAULTS.as_dict(),
-        "changed": bool(changed),
-        "reset": reset,
-    }
 
 
 def migrate_enabled(enabled: Any) -> list[str]:

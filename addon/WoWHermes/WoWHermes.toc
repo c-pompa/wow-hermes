@@ -23,7 +23,6 @@ PromptFrame.lua
 Confirm.lua
 ReloadPrompt.lua
 Format.lua
-MapPin.lua
 Scrollbar.lua
 Display.lua
 CopyFrame.lua

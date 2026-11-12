@@ -220,24 +220,6 @@ function Display:Ensure()
     transcript:SetScript("OnMouseWheel", function(frame, delta)
         Display.OnTranscriptWheel(frame, delta)
     end)
-    -- Clickable map coordinates (WS-V). SetHyperlinksEnabled is a protected
-    -- widget setter; house policy is to pcall it on our own frame (same as
-    -- EnableMouse above) so a client that refuses it only costs the links.
-    Display.linksEnabled = false
-    if type(transcript.SetHyperlinksEnabled) == "function" then
-        Display.linksEnabled = pcall(transcript.SetHyperlinksEnabled, transcript, true)
-    end
-    ---@diagnostic disable-next-line: undefined-global
-    transcript:SetScript("OnHyperlinkClick", function(frame, link, text, button)
-        Display:OnHyperlinkClick(frame, link, text, button)
-    end)
-    transcript:SetScript("OnHyperlinkEnter", function(frame, link)
-        Display:OnHyperlinkEnter(frame, link)
-    end)
-    transcript:SetScript("OnHyperlinkLeave", function()
-        ---@diagnostic disable-next-line: undefined-global
-        if GameTooltip then GameTooltip:Hide() end
-    end)
     f.transcript = transcript
 
     -- Right-edge transcript scroll bar (WS-K). MinimalScrollBar + the native
@@ -342,7 +324,7 @@ function Display:Ensure()
 
     local hint = f:CreateFontString(nil, "OVERLAY")
     hint:SetFontObject(GameFontDisableSmall)
-    hint:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 122, 30)
+    hint:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 74, 30)
     hint:SetTextColor(0.6, 0.6, 0.6)
     hint:SetText("Enter sends · Shift+Enter adds a line · Esc closes")
     f.hint = hint
@@ -370,33 +352,6 @@ function Display:Ensure()
         if GameTooltip then GameTooltip:Hide() end
     end)
     f.copyButton = copy
-
-    ---@diagnostic disable: undefined-global
-    -- Pin (WS-V): the controller/mouse path to the same waypoint the transcript
-    -- links set. It shares the Copy row because the action row has no free slot
-    -- at MIN_WIDTH (Send starts at width - 94; Save..New already end at 240).
-    -- Ordinary UIPanelButtonTemplate like every other button here: reachable
-    -- with the client's native controller cursor, no gamepad manager involved.
-    local pin = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    pin:SetSize(40, 16)
-    pin:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 72, 28)
-    pin:SetText("Pin")
-    pin:SetScript("OnClick", function()
-        Display:PinNext()
-    end)
-    pin:SetScript("OnEnter", function(owner)
-        if not GameTooltip then return end
-        GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
-        GameTooltip:SetText("Pin coordinates")
-        GameTooltip:AddLine("Pin the coordinate pair in the newest Hermes reply on your map. "
-            .. "With several pairs, press again for the next one.", 1, 1, 1, true)
-        GameTooltip:Show()
-    end)
-    pin:SetScript("OnLeave", function()
-        if GameTooltip then GameTooltip:Hide() end
-    end)
-    f.pinButton = pin
-    ---@diagnostic enable: undefined-global
 
     -- Bottom-right resize grip. PanelResizeButtonTemplate is Blizzard's own 16x16
     -- size grabber (SharedXML/Mainline/SharedUIPanelTemplates.xml:1642, textures
@@ -463,52 +418,6 @@ function Display.OnTranscriptWheel(transcript, delta)
     else
         if transcript.ScrollDown then transcript:ScrollDown() end
     end
-end
-
--- ------------------------------------------------------- transcript links
----@diagnostic disable: undefined-global
--- A coordinate pair in a reply is a custom `addon:` hyperlink (LinkUtil.lua:4
--- lists AddOn = "addon"). Our links are handled here; every other link type
--- falls through to the client's own handler so nothing regresses.
-function Display.OnHyperlinkClick(_, frame, link, text, button)
-    local pin = ns.MapPin
-    if pin and type(pin.HandleLink) == "function" then
-        local ok, handled = pcall(pin.HandleLink, link)
-        if ok and handled then return true end
-        if not ok and ns.Core and ns.Core.reportError then
-            pcall(ns.Core.reportError, "Display:OnHyperlinkClick", handled)
-        end
-    end
-    if type(SetItemRef) == "function" then
-        local ok = pcall(SetItemRef, link, text, button, frame)
-        return ok
-    end
-    return false
-end
-
-function Display:OnHyperlinkEnter(frame, link)
-    local pin = ns.MapPin
-    if not pin or type(pin.IsPinLink) ~= "function" then return end
-    local ok, isPin = pcall(pin.IsPinLink, link)
-    if not ok or not isPin or not GameTooltip then return end
-    GameTooltip:SetOwner(frame or self.frame, "ANCHOR_CURSOR")
-    GameTooltip:SetText("Click to pin on your map")
-    GameTooltip:Show()
-end
----@diagnostic enable: undefined-global
-
--- The window's Pin button (WS-V): delegate to MapPin, and report a bug through
--- the addon's own error path instead of the client's error frame.
-function Display.PinNext(_)
-    local pin = ns.MapPin
-    if not pin or type(pin.PinNext) ~= "function" then return end
-    local ok, done = pcall(pin.PinNext)
-    if not ok then
-        if ns.Core and ns.Core.reportError then ns.Core.reportError("Display:PinNext", done) end
-        say("Map pin failed: " .. tostring(done))
-        return false
-    end
-    return done
 end
 
 -- ------------------------------------------------------- movement fade
