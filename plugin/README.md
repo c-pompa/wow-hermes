@@ -1,214 +1,216 @@
-# `wow` — Hermes platform plugin for World of Warcraft: Forever
+# WoW Hermes
 
-The gateway-side half of WoWHermes. The companion bridge next to the game client POSTs chat
-lines to this adapter and long-polls an outbox for replies. One character (`Name-Realm`) = one
-Hermes DM session.
+Talk to a Hermes agent from inside **World of Warcraft: Forever**.
 
-Wire contract: [`docs/PROTOCOL.md`](../docs/PROTOCOL.md) §C. Implementation notes, hook
-findings and troubleshooting: [`docs/notes/ws-plugin.md`](../docs/notes/ws-plugin.md).
+WoW Hermes connects the game chat to a Hermes profile: a companion bridge next to
+the game captures your chat lines and writes the agent's replies back into the
+client through the addon. One character (`Name-Realm`) is one Hermes DM session.
 
-```
-hermes_plugin/wow/
-  plugin.yaml     manifest (kind: platform, name wow-platform, env declarations)
-  __init__.py     import-light: defers adapter.py until the platform is asked for
-  adapter.py      WoWAdapter(BasePlatformAdapter) + register(ctx)
-  tests/
-    plugin_loader.py     loads adapter.py by path (hermes-agent loader pattern)
-    test_wow_plugin.py   62 tests: registration, auth, validation, inbound, outbox, done
-    live_check.py        standalone adapter + curl transcript, no LLM, no gateway
-```
+This repository is the **public release mirror** of the project. It is a
+sanitized snapshot of a private development tree, not that tree's history. The
+Hermes catalog entry for this plugin has been prepared but **is not listed yet**;
+until a maintainer merges it, install from this repository at a pinned commit as
+shown below.
 
-## Endpoints (default `127.0.0.1:8791`)
+## What you get
 
-| Route | Auth | Purpose |
-|---|---|---|
-| `GET /v1/wow/health` | none on loopback, bearer otherwise | liveness (`{ok,platform,version,connected,characters}`) |
-| `POST /v1/wow/message` | `Authorization: Bearer $WOW_BRIDGE_TOKEN` | one inbound chat line → `MessageEvent`; `202 {ok,accepted[,reason]}` |
-| `GET /v1/wow/outbox?character=&since=&wait=` | bearer | long-poll `reply`/`typing`/`done` frames, `wait` 0–25 s |
+- **In-game chat platform for Hermes** — `kind: platform` gateway adapter with a
+  local HTTP endpoint (`/v1/wow/message`, `/v1/wow/outbox`, `/v1/wow/health`),
+  bearer-token authentication, one DM session per character.
+- **Three per-character toolsets** selected with `/mode`:
+  - `standard` — everyday Hermes tools, including quest and addon help.
+  - `wow` — WoW-only tools plus web search; the small surface for play.
+  - `full` — the whole Hermes toolset. Requires an in-game confirmation and
+    lapses back to `standard` after 60 minutes.
+- **Five WoW tools** — `wow_addon_search`, `wow_addon_guide`,
+  `wow_addon_install`, `wow_addon_uninstall`, `wow_quest_help`.
+- **Bundled skill** — `wow-player-guide` explains the modes, the in-game channel
+  rules, and the addon workflows.
+- **Desktop setup page** — creates or updates a dedicated Hermes profile
+  (`wow`), writes its environment and gateway config, renders `SOUL.md` and a
+  profile skill, and shows adapter status and the one-time bridge token.
+- **Addon management** — search CurseForge for Forever-compatible addons,
+  queue an install for the bridge, and uninstall by moving the folder to a
+  removal backup. The player confirms every write in game.
 
-`202 accepted:false` reasons: `duplicate`, `unauthorized` (character not in the allowlist).
-A missing/wrong token is `401`. Bodies > 64 KiB are `413`. Bad JSON/character/text/msg_id are
-`400` with `{ok:false,error:<code>}`.
+## Requirements
 
-## Deploy — a NEW dedicated profile named `wow`
+| Part | Requirement |
+|---|---|
+| Hermes | **0.22.7 or newer** (validated on 0.22.7). The catalog entry declares the same floor. |
+| Game | **World of Warcraft: Forever**, Interface **16001** (build 1.60.1.70862). |
+| Bridge host | **Windows 11**, on the same PC as the game or on the same trusted network. `uv` downloads a private Python for the bridge. |
+| Network | The Windows bridge must reach the Hermes listener over HTTP. Loopback when both run on the same PC; otherwise a LAN/VPN address you choose and firewall. |
+| CurseForge (optional) | Your own CurseForge Core API key, only for one-click addon installs. Without it the addon tools return a CurseForge deep link. |
 
-> **These steps are for the coordinator. They were NOT executed by WS-C.** The machine runs a
-> multiplexed gateway serving 15 profiles (DEC-009): never restart it as part of a plugin test.
-> Read the whole section before running anything.
+macOS and Linux can host Hermes and the plugin; the bridge itself is
+Windows-only.
 
-### 1. Create the profile
+## Install the Hermes plugin
 
-```bash
-hermes profile create wow            # -> /Users/you/.hermes/profiles/wow
-hermes profile show wow              # confirm path, model, skills
-export WOW_HOME_DIR="$HOME/.hermes/profiles/wow"
-```
-
-A dedicated profile is deliberate: the WoW surface gets its own sessions, model choice,
-allowlist and `WOW_BRIDGE_TOKEN`, and cannot widen the blast radius of the main profile.
-
-### 2. Install the plugin (copy, not symlink, so profile archives are self-contained)
-
-```bash
-mkdir -p "$WOW_HOME_DIR/plugins"
-rsync -a --delete \
-  --exclude '__pycache__' --exclude '.pytest_cache' \
-  /src/wow-hermes-plugin/hermes_plugin/wow/ \
-  "$WOW_HOME_DIR/plugins/wow/"
-
-# static gates (both are read-only)
-hermes plugins validate "$WOW_HOME_DIR/plugins/wow"
-hermes -p wow plugins list | grep -i wow
-```
-
-`hermes plugins validate` must print `Validation passed.` (it runs `register()` in isolation,
-scans for core overrides and checks the capability manifest).
-
-### 3. Credentials and settings — that profile's `.env`
-
-Env vars live in the profile's `.env` (there is no `config set-env` verb):
+Choose a commit in this repository and install its `plugin/` subdirectory:
 
 ```bash
-hermes -p wow config env-path            # -> /Users/you/.hermes/profiles/wow/.env
-TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+hermes plugins install c-pompa/wow-hermes/plugin --ref <40-hex-commit-sha> --enable
+```
 
-cat >> "$(hermes -p wow config env-path)" <<EOF
-WOW_BRIDGE_TOKEN=$TOKEN
-WOW_HOST=192.0.2.10
+`--ref` takes the full 40-character SHA; branches and short SHAs are refused.
+`--enable` selects the plugin in the active profile. After a catalog listing is
+merged, `hermes plugins install wow` will install the reviewed pin instead.
+
+To validate a checkout before installing:
+
+```bash
+hermes plugins validate plugin/
+```
+
+### Set up the profile
+
+**Desktop (recommended).** Open Hermes Desktop → Plugins → **WoW Hermes**.
+Fill in your character (`Name-Realm`, e.g. `Thrall-Area52`), the profile to
+create (`wow` by default), the starting mode, the listener host and port, and
+optionally your CurseForge key. Save. The page creates the profile, writes its
+`.env` and `config.yaml`, renders `SOUL.md` and a profile skill, and shows the
+gateway URL and a one-time bridge token. If the profile's gateway is already
+running under a multiplexer it may be hot-served; otherwise start it:
+
+```bash
+hermes -p wow gateway start
+```
+
+**CLI.** The same result without Desktop:
+
+```bash
+hermes profile create wow
+hermes -p wow plugins enable wow
+
+# Values live in this profile's .env (ask Hermes for the path):
+hermes -p wow config env-path
+```
+
+Add to that file:
+
+```dotenv
+WOW_BRIDGE_TOKEN=<64 hex characters>
+WOW_HOST=127.0.0.1
 WOW_PORT=8791
-WOW_ALLOWED_USERS=Thrall-Area52,Jaina-Proudmoore
+WOW_ALLOWED_USERS=Thrall-Area52
 WOW_HOME_CHANNEL=Thrall-Area52
-EOF
 ```
 
-Interactive alternative: `hermes -p wow gateway setup` offers the platform and prompts for the
-same keys (the manifest's `requires_env`/`optional_env` descriptions and the `WOW_BRIDGE_TOKEN`
-password flag come from `plugin.yaml`).
-
-- `WOW_HOST` — default is `127.0.0.1`, which the game PC cannot reach. For the real deployment
-  set the VLAN-15 address `192.0.2.10`, or `0.0.0.0` if the address can change. Opening it to
-  the LAN makes `WOW_BRIDGE_TOKEN` the only trust boundary: use a 64-hex-char token, never log
-  it, and firewall `8791` to VLAN 15 only.
-- `WOW_ALLOWED_USERS` — comma-separated `Name-Realm` keys, case-insensitive; a realm with spaces
-  is written with hyphens (`Area 52` → `Area-52`). Leave it empty to let the gateway's normal
-  authorization ladder (pairing) decide; set it for a locked-down install.
-- `WOW_BRIDGE_TOKEN` — if unset the adapter generates one in memory at startup and logs it as
-  being unset; the bridge then cannot know it, so set it explicitly.
-
-#### CurseForge key — one per machine, not per profile
-
-The CurseForge Core API key belongs to the player, not to a character or profile, so it is stored
-once per machine and shared by every Hermes profile on it:
-
-```
-<hermes root>/plugin-data/wow/curseforge.key     # one line, 0600, atomic write
-```
-
-`<hermes root>` is the Hermes home with any `profiles/<name>` tail removed — `~/.hermes` on this
-Mac (so `default`, `wow`, `gamedev-s2` all resolve to the same file) and `%LOCALAPPDATA%\hermes`
-on Windows (shared by the profiles under it). It is **not** synced between machines.
-
-- Preferred: save it once through the desktop setup form / `POST /api/plugins/wow/setup`
-  (`curseforge_api_key`). That writes the shared file and removes any profile `.env` copy so the
-  key is stored once.
-- `curseforge_api_key: "clear"` deletes the shared file **and** the target profile's
-  `WOW_CURSEFORGE_API_KEY`; empty/absent leaves everything unchanged.
-- Resolution order at tool time: shared file first, then this profile's scoped
-  `WOW_CURSEFORGE_API_KEY` (backward compatibility for older installs), then no key. A shared file
-  that exists always wins, so rotating it through any profile changes it for all of them.
-- An unreadable shared file falls back to the env with a non-secret warning (path + error type
-  only). The key and the file contents are never returned, logged, or shown in `/status`; `/status`
-  reports only `curseforge_key_set` and `curseforge_key_scope` (`shared` | `profile` | `null`).
-
-Full semantics: `docs/notes/ws-shared-key.md`.
-
-### 4. `config.yaml` (optional — env alone is enough)
-
-Env seeding already populates `extra`, so the only mandatory key is enablement. If you prefer
-YAML (it also documents the shape for readers):
-
-```yaml
-# $WOW_HOME_DIR/config.yaml
-gateway:
-  platforms:
-    wow:
-      enabled: true
-      extra:
-        host: "192.0.2.10"
-        port: 8791
-        # allowed_characters: "Thrall-Area52"   # advisory only; the env var is authoritative
-```
-
-Do not hand-edit if you can use `hermes -p wow config set gateway.platforms.wow.extra.host …`;
-env beats YAML for every key (`_shared.extra_or_secret` reads the env first).
-
-### 5. Enable the plugin
+`WOW_HOST` defaults to `127.0.0.1`. Set it to the address the Windows bridge
+will dial only if the bridge runs on another machine, and firewall the port to
+that machine. Then enable the platform and start the gateway:
 
 ```bash
-hermes -p wow plugins enable wow        # writes plugins.enabled in that profile's config
-hermes -p wow plugins doctor wow        # runtime-contract check (optional)
-```
-
-### 6. Start the gateway — the only step with blast radius
-
-Two shapes; pick one with the user, not unilaterally:
-
-- **Dedicated per-profile gateway** (isolated, recommended for a first rollout):
-  `hermes -p wow gateway install` then `hermes -p wow gateway start`. It binds `WOW_PORT` from
-  its own config and takes the scoped lock `wow-bridge:192.0.2.10:8791`.
-- **Serve `wow` from the existing multiplexed gateway** (no new port, shares the process):
-  enable the plugin in that profile, then restart the multiplexer **at a planned, user-approved
-  moment**. Never restart it to test the plugin.
-
-Starting the dedicated profile gateway does not touch the multiplexed one; only one of the two
-may own `host:port` — a second `connect()` fails with `wow-bridge endpoint … already in use`
-(`_acquire_platform_lock`, `gateway/platforms/base.py:2143`). Give each profile its own
-`WOW_PORT` if both must run.
-
-### 7. Verify
-
-```bash
-hermes -p wow gateway status | grep -i "world of warcraft"
-hermes -p wow gateway logs | grep '\[wow\]'      # "Bridge endpoint listening on http://…"
-
-# from the Mac itself (loopback health needs no token)
+hermes -p wow config set gateway.platforms.wow.enabled true
+hermes -p wow gateway start
 curl -s http://127.0.0.1:8791/v1/wow/health
-# from game-pc (token required; use the value from step 3)
-curl -s -H "Authorization: Bearer $TOKEN" http://192.0.2.10:8791/v1/wow/health
 ```
 
-Expected: `{"ok": true, "platform": "wow", "version": 1, "connected": true, "characters": []}`.
+Expected: `{"ok": true, "platform": "wow", "version": 1, ...}`. A second
+gateway cannot bind the same host:port; give each profile its own `WOW_PORT`.
 
-### 8. Cron / `send_message`
+`WOW_BRIDGE_TOKEN` is the shared secret the bridge sends as
+`Authorization: Bearer …`. If it is unset the adapter generates one in memory
+at startup and the bridge cannot know it, so set it explicitly. The character
+name is asserted by the bridge, not by Blizzard; the token is the only real
+authentication boundary.
 
-`cronjob(deliver="wow")` routes to `WOW_HOME_CHANNEL`, but delivery needs a **live** adapter in
-the same process: the outbox is in-memory (the bridge long-polls it over HTTP). `standalone_sender_fn`
-therefore returns an explicit error rather than pretending to deliver. A cron job created from
-inside a WoW session works normally — it inherits the live gateway.
+## Install the addon and the bridge
 
-## Security model
+The bridge is a separate program. It captures a 1600×400 pixel strip from the
+game window, decodes chat, forwards it to Hermes, and writes replies back into
+the addon's slot files in the WoW `AddOns` tree. It also installs the addon and
+its 256 load-on-demand slot addons.
 
-1. **Bearer token** on every route except loopback health (`hmac.compare_digest`). This is the
-   only real trust boundary: the character name is asserted by the bridge, not by Blizzard.
-2. **Allowlist** (`WOW_ALLOWED_USERS` / `WOW_ALLOW_ALL_USERS`) is checked here and by the
-   gateway core; it is attribution and convenience, not authentication.
-3. **Body cap 64 KiB**, strict `Name-Realm` regex, dedupe by `msg_id`, no token ever logged.
-4. `trusted_inbound` stays **False**; `allow_update_command` is **False** (a `/update` issued
-   from inside the game must not restart the gateway mid-instance).
-5. **CurseForge key** lives in a `0600` machine-wide file (`plugin-data/wow/curseforge.key`) so one
-   key serves every profile on this host; per-profile env remains only as a fallback. Unreadable
-   file → env fallback with a path-only warning. Never returned, logged, or echoed by `/setup` or
-   `/status`.
+Download `wowhermes-bridge-v0.2.0.zip` from the release and extract it. The
+bundle includes the addon, locked bridge source and a PowerShell bootstrap. From
+the extracted directory, run:
 
-## Development
-
-```bash
-cd /src/wow-hermes-plugin
-PYTHONPATH=$HOME/.hermes/hermes-agent \
-  "$HOME/.hermes/hermes-agent/.venv/bin/python" -m pytest hermes_plugin/wow/tests -q
-PYTHONPATH=$HOME/.hermes/hermes-agent \
-  "$HOME/.hermes/hermes-agent/.venv/bin/python" hermes_plugin/wow/tests/live_check.py
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bootstrap\install.ps1 `
+    -WowDir "D:\Games\World of Warcraft\_forever_" `
+    -GatewayUrl "http://192.0.2.10:8791"
 ```
 
-The tests load `adapter.py` by path (nothing is copied into the Hermes checkout) and the live
-check binds an ephemeral `127.0.0.1` port with a throwaway `HERMES_HOME`.
+The installer prompts for the one-time bridge token without echoing it. It finds
+or downloads a checksum-verified `uv`, installs a private Python 3.12, creates a
+locked virtual environment, installs the addon and slot addons, writes UTF-8
+(no-BOM) configuration, and can register a per-user AtLogOn task. No Git,
+preinstalled Python, SSH or administrator rights are required. Use `-LocalGateway`
+instead of `-GatewayUrl` when Hermes runs on the same PC, `-DryRun` to preview,
+and `-NoAutostart` for manual-only startup.
+
+For a source-only alternative, `uv run wowhermes-bridge install --wow <path>`
+and `uv run wowhermes-bridge run` work from `bridge/` after `uv sync --frozen`.
+The bridge must be running whenever you use chat in game. Verify release files
+against `SHA256SUMS` before installing. Nothing in the plugin downloads or
+replaces the bridge for you.
+
+CurseForge addon availability is **separate** from this repository and from the
+Hermes plugin: the addon tools query CurseForge, and an addon installs only when
+its author allows third-party distribution and a Forever-compatible file
+exists. Otherwise the tool returns a `curseforge://` link for the player to
+finish in the CurseForge app.
+
+## Security and privacy
+
+Read this before installing. The full disclosure is also in the Hermes catalog
+entry and the upstream pull request.
+
+- **Local HTTP listener.** The plugin opens `WOW_HOST:WOW_PORT` (loopback by
+  default; optionally a LAN address) with plain HTTP. `/v1/wow/message` and
+  `/v1/wow/outbox` require `Authorization: Bearer $WOW_BRIDGE_TOKEN`;
+  `/v1/wow/health` needs no token on loopback. There is no TLS: use loopback, a
+  trusted LAN/VPN, and a firewall rule that admits only the bridge host.
+- **Bearer token.** A wrong or missing token is `401`. The token is never
+  logged or returned by the status page. The character name is bridge-asserted
+  (`WOW_ALLOWED_USERS` is attribution/convenience, not authentication).
+- **Screen capture.** The Windows bridge captures pixels from the game window
+  with the Windows Graphics Capture API (mss/GDI fallback). It is restricted to
+  the addon's chat strip; it does not read the game process or its memory,
+  inject input, or automate gameplay.
+- **Files outside the plugin's data directory.** The bridge writes the addon
+  and slot files under the WoW `AddOns` directory and reads SavedVariables for
+  reload mode. Uninstall moves the addon folder into a removal backup; it does
+  not permanently delete it.
+- **Outbound network.** The bridge makes HTTP requests to the Hermes host you
+  configure. The plugin makes CurseForge API calls (`api.curseforge.com`) with
+  your key. The key is stored once per machine at
+  `plugin-data/wow/curseforge.key` (mode `0600`), with the profile's
+  `WOW_CURSEFORGE_API_KEY` as a fallback; it is never returned to the model or
+  logged.
+- **Model provider.** Chat text and tool results from the game go to whichever
+  model provider the `wow` Hermes profile is configured to use — cloud or
+  local. That provider's data-handling terms apply, and token spend is yours.
+  Tool results can include addon metadata and quest text.
+- **Local tools and modes.** `standard` and `wow` keep the surface small;
+  `full` exposes the whole Hermes toolset (terminal, files, desktop control)
+  until it expires. `full` requires an in-game confirmation.
+- **Background process.** The bridge is a long-running process next to the
+  game; it must stay running for chat to work.
+- **One-time setup writes.** The desktop setup page creates/updates the `wow`
+  profile, its `.env`, `config.yaml`, `SOUL.md`, and a profile skill, and may
+  ask a running gateway multiplexer to serve the new profile. It does not
+  restart the game or the Hermes gateway.
+- **No telemetry.** The plugin and bridge send nothing to the project author.
+- **Compatibility.** Requires Hermes 0.22.7+, Windows 11 for the bridge, and
+  WoW: Forever (Interface 16001). Other clients/versions are not supported.
+
+## Known limitations
+
+- The game must run **windowed or borderless-windowed**; exclusive fullscreen
+  exposes no capturable window.
+- One character = one Hermes session; the bridge reports the character name.
+- Addon installation depends on CurseForge metadata and the author's
+  distribution setting, and is never silent: the player confirms in game.
+- The public repository is a release mirror; older development commits and
+  internal notes are not published.
+- Cron/notification delivery to `wow` needs a live adapter in the same gateway
+  process; the outbox is in memory.
+
+## License
+
+MIT. See [LICENSE](LICENSE). Third-party design credits and prior art are in
+the bridge package's `NOTICE` file.
