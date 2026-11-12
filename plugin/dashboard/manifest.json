@@ -1,0 +1,6 @@
+{
+  "name": "wow",
+  "api": "plugin_api.py",
+  "title": "World of Warcraft",
+  "description": "In-game chat platform setup: character, profile, default mode, bridge host/port."
+}

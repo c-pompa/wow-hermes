@@ -1,0 +1,41 @@
+[project]
+name = "wowhermes-bridge"
+version = "0.2.0"
+description = "Windows companion bridge for the WoWHermes addon: pixel capture, slot publishing, doorbells, Hermes gateway client and overlay."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "pillow>=10.0",
+    # Windows-only capture stack; uv resolves markers per platform so a macOS
+    # checkout (tests, dev) never fetches these.
+    "mss>=9.0.1; sys_platform == 'win32'",
+    "windows-capture>=2.0.1; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+overlay = ["PySide6>=6.6"]
+
+# `uv run` includes this group by default, so `uv run pytest` works on a fresh checkout.
+# (`uv run --all-extras pytest` additionally pulls PySide6 for the real-Qt overlay test.)
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+wowhermes-bridge = "wowhermes_bridge.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["wowhermes_bridge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "windows: exercises Windows-only behaviour (skipped elsewhere)",
+]

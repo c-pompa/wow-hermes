@@ -1,0 +1,13 @@
+# NOTICE
+
+This package is MIT licensed, like the rest of wow-hermes-plugin.
+
+Design input (read, not copied):
+
+- `chelinho139/wow-ai` (MIT) — pixel-strip capture loop, slot installer bookkeeping
+  (`ensure()`-style created/kept counting) and the silent-WAV doorbell idea.
+- `Geraldlol/witchcraft` (MIT) — atomic slot writes with rename retries on Windows
+  (WinError 5/32) and the click-through overlay toggle pattern.
+
+No code was copied from unlicensed projects. Behaviour that follows published protocol
+research lives in `docs/research/06-prior-art-and-transport-spec.md`.

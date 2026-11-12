@@ -1,0 +1,33 @@
+## Interface: 16001
+## Title: WoW Hermes
+## Notes: Chat with your Hermes AI agent from inside Azeroth.
+## Author: cpompa
+## Version: 0.2.0
+## Category: Chat & Communication
+## IconTexture: Interface\AddOns\WoWHermes\media\hermes
+## SavedVariables: WoWHermesDB
+## AddonCompartmentFunc: WoWHermes_OnCompartmentClick
+## AddonCompartmentFuncOnEnter: WoWHermes_OnCompartmentEnter
+## AddonCompartmentFuncOnLeave: WoWHermes_OnCompartmentLeave
+## X-License: MIT
+
+Inbox.lua
+Codec.lua
+Strip.lua
+History.lua
+Notes.lua
+Quest.lua
+Slots.lua
+Outbox.lua
+PromptFrame.lua
+Confirm.lua
+ReloadPrompt.lua
+Format.lua
+Scrollbar.lua
+Display.lua
+CopyFrame.lua
+NotesFrame.lua
+ChatTab.lua
+MinimapButton.lua
+Options.lua
+Core.lua

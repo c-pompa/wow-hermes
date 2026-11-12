@@ -1,0 +1,55 @@
+# NOTICE — WoWHermes
+
+WoWHermes (Hermes platform plugin, WoW Forever addon and Windows bridge) is released
+under the MIT License; see `LICENSE`. Copyright (c) 2026 cpompa / WoWHermes
+contributors.
+
+## Not affiliated with Blizzard or Nous Research
+
+WoWHermes is an unofficial community project. It is not endorsed by or affiliated with
+Blizzard Entertainment or Nous Research. World of Warcraft and Blizzard Entertainment
+are trademarks or registered trademarks of Blizzard Entertainment, Inc. Hermes Agent is
+a product of Nous Research.
+
+## Hermes icon art
+
+`addon/WoWHermes/media/hermes.tga` and `hermes-portrait.tga` are derived from the
+Hermes Agent desktop application assets (Nous Research), which are distributed under
+the MIT License (`hermes-agent/LICENSE`, "Copyright (c) 2025 Nous Research"). The art
+is used here only to label the addon's Hermes connection and is not an official Hermes
+or Nous Research logo use.
+
+## Addon
+
+The addon talks to the game only through the public Blizzard UI API. No Blizzard code,
+art, or data files are copied. The addon is MIT licensed.
+
+## Bridge and plugin dependencies
+
+The bridge and plugin are MIT licensed. They depend on third-party packages that keep
+their own licenses; all are permissively licensed. The versions are pinned in
+`bridge/uv.lock` and `bridge/pyproject.toml`.
+
+| Component | License | Project |
+|---|---|---|
+| uv (downloaded by the bootstrap installer) | MIT OR Apache-2.0 | https://github.com/astral-sh/uv |
+| CPython 3.12 (installed by uv) | PSF License Agreement | https://www.python.org/ |
+| httpx | BSD-3-Clause | https://www.python-httpx.org/ |
+| numpy | BSD-3-Clause | https://numpy.org/ |
+| Pillow | HPND | https://python-pillow.org/ |
+| mss (Windows only) | MIT | https://github.com/BoboTiG/python-mss |
+| windows-capture (Windows only) | MIT | https://github.com/NiiightmareXD/windows-capture |
+| PySide6 (optional `overlay` extra) | LGPL-3.0 (or GPL-3.0 / commercial) | https://www.qt.io/qt-for-python |
+
+The bootstrap installer downloads uv from the official Astral GitHub release and
+verifies its SHA256 before use. It never downloads or executes a script from a URL.
+
+## Design input (read, not copied)
+
+- `chelinho139/wow-ai` (MIT) — pixel-strip capture loop, slot installer bookkeeping
+  (`ensure()`-style created/kept counting) and the silent-WAV doorbell idea.
+- `Geraldlol/witchcraft` (MIT) — atomic slot writes with rename retries on Windows
+  (WinError 5/32) and the click-through overlay toggle pattern.
+
+No code was copied from unlicensed projects. Behaviour that follows published protocol
+research lives in `docs/research/06-prior-art-and-transport-spec.md`.

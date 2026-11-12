@@ -1,0 +1,82 @@
+name: wow
+label: World of Warcraft
+kind: platform
+version: 0.2.0
+manifest_version: 2
+api_version: 1
+requires_hermes: ">=0.22.7"
+license: MIT
+description: >
+  World of Warcraft (Forever) in-game chat platform adapter for Hermes Agent,
+  packaged as one installable plugin: the bridge adapter, three per-character
+  /mode toolsets (standard | wow | full), WoW-only tools (addon search,
+  install, uninstall, quest help), a bundled skill, and a desktop setup page that
+  creates and configures the target profile.
+
+  The companion bridge running next to the game client POSTs chat lines to a
+  local HTTP endpoint (/v1/wow/message, bearer token) and long-polls a
+  per-character outbox (/v1/wow/outbox) for replies, typing frames and
+  end-of-turn markers. One WoW character (Name-Realm) is one Hermes DM
+  session. No SDK: aiohttp already ships with Hermes.
+
+  Identity note: the character name is asserted by the bridge, not by
+  Blizzard, so the bearer token is the trust boundary; WOW_ALLOWED_USERS is
+  attribution/convenience, not authentication.
+author: cpompa
+provides_tools:
+  - wow_addon_search
+  - wow_addon_guide
+  - wow_addon_install
+  - wow_addon_uninstall
+  - wow_quest_help
+config_schema:
+  default_mode:
+    type: str
+    default: standard
+    description: >-
+      Toolset every new character starts in: standard | wow | full
+      (full still needs an in-game confirmation)
+  host:
+    type: str
+    default: "127.0.0.1"
+    description: >-
+      Bridge bind address (must match WOW_HOST; set the LAN IP explicitly to
+      reach the game PC)
+  port:
+    type: int
+    default: 8791
+    description: "Bridge port (must match WOW_PORT)"
+  full_ttl_minutes:
+    type: int
+    default: 60
+    description: "How long /mode full stays on before it lapses back to standard"
+requires_env:
+  - name: WOW_BRIDGE_TOKEN
+    description: "Shared secret the bridge presents as 'Authorization: Bearer ...' (auto-generated in memory when unset)"
+    prompt: "WoW bridge bearer token"
+    password: true
+optional_env:
+  - name: WOW_HOST
+    description: "Bind address for the bridge endpoint (default 127.0.0.1; set the LAN IP explicitly to reach the game PC)"
+    prompt: "Bind host (default 127.0.0.1)"
+    password: false
+  - name: WOW_PORT
+    description: "Port for the bridge endpoint (default 8791)"
+    prompt: "Port (default 8791)"
+    password: false
+  - name: WOW_ALLOWED_USERS
+    description: "Comma-separated character keys allowed to talk to the agent (Name-Realm)"
+    prompt: "Allowed characters (comma-separated)"
+    password: false
+  - name: WOW_ALLOW_ALL_USERS
+    description: "Allow any character (dev only — disables the allowlist)"
+    prompt: "Allow all characters? (true/false)"
+    password: false
+  - name: WOW_CURSEFORGE_API_KEY
+    description: "The player's own CurseForge Core API key — normally saved once per machine in plugin-data/wow/curseforge.key; this profile env is only a fallback (never returned)"
+    prompt: "CurseForge API key"
+    password: true
+  - name: WOW_HOME_CHANNEL
+    description: "Character key (Name-Realm) that receives cron / notification delivery"
+    prompt: "Home character (Name-Realm)"
+    password: false
